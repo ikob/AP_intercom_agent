@@ -1,0 +1,22 @@
+{
+    "configurations": [
+
+        {
+            "name": "Launch Program",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/",
+            "env": {},
+            "args": [
+                "-username", "cellphone0", 
+                "-password", "<YOUR_PASSWORD>", 
+                "-allowed-caller", "interphone0", 
+                "-register-uri","SIP server address e.g. sip:", 
+                "-message-uri", "Message recipient e.g. sip:", 
+                "-entrance-uri", "Entrance recipient e.g. sip:",
+                "-answer-calls=false",
+                "-send-messages=true"
+            ]
+        }]
+}

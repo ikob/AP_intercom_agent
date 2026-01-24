@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: Copyright (c) 2026, Katsushi Kobayashi
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"time"
+)
+
+type HTTPServer struct {
+	srv   *http.Server
+	agent *Agent
+	cfg   *Config
+	msg   *MessageBuffer
+}
+
+func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, msg *MessageBuffer) *HTTPServer {
+	if listen == "" {
+		return nil
+	}
+
+	h := &HTTPServer{
+		agent: agent,
+		cfg:   cfg,
+		msg:   msg,
+	}
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	})
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		resp := map[string]any{
+			"config_path": cfg.LoadedConfigPath,
+			"config":      cfg,
+			"runtime": map[string]any{
+				"answer_calls":  agent.answerEnabled.Load(),
+				"send_messages": agent.messageEnabled.Load(),
+			},
+		}
+
+		b, err := SaveConfigJSON(resp)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(b)
+	})
+
+	mux.HandleFunc("/v1/state", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"answer_calls":  agent.answerEnabled.Load(),
+				"send_messages": agent.messageEnabled.Load(),
+			})
+			return
+
+		case http.MethodPost:
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			_ = r.Body.Close()
+
+			// pointer bool
+			var req struct {
+				AnswerCalls  *bool `json:"answer_calls"`
+				SendMessages *bool `json:"send_messages"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				http.Error(w, "invalid json", http.StatusBadRequest)
+				return
+			}
+
+			if req.AnswerCalls != nil {
+				agent.SetAnswerEnabled(*req.AnswerCalls)
+			}
+			if req.SendMessages != nil {
+				agent.SetMessageEnabled(*req.SendMessages)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"answer_calls":  agent.answerEnabled.Load(),
+				"send_messages": agent.messageEnabled.Load(),
+			})
+			return
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+	})
+
+	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(msg.Snapshot())
+	})
+
+	h.srv = &http.Server{
+		Addr:              listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		slog.Info("HTTP server listening", "addr", listen)
+		if err := h.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("HTTP server error", "error", err)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		shCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = h.srv.Shutdown(shCtx)
+	}()
+
+	return h
+}
