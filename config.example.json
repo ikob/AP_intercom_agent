@@ -1,0 +1,34 @@
+{
+  "username": "YOUR_USER",
+  "password": "YOUR_PASS",
+
+  "proxy_host": "192.168.100.25:5060",
+  "user_agent_hostname": "192.168.100.25",
+
+  "bind_host": "192.168.100.5",
+  "bind_port": 15060,
+
+  "contact_host": "192.168.100.5",
+  "contact_port": 15060,
+  "contact_params": ";+l.operator.docomo.intercom",
+
+  "expiry": "3600s",
+  "retry_interval": "60s",
+
+  "register_uri": "sip:123@example.com",
+  "message_uri": "sip:message@example.com",
+  "entrance_uri": "sip:entrance@example.com",
+
+  "message_content_type": "application/intercom.message+xml",
+  "message_body": "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><IFBOX version = \"1.0\"><SYSTEM><SYS_COMMAND><USER_COMM  state = \"request\"  type = \"housing\">ALL</USER_COMM></SYS_COMMAND></SYSTEM></IFBOX>",
+
+  "entrance_content_type": "application/intercom.message+xml",
+  "entrance_body": "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\r\n<IFBOX version = \"1.0\">\r\n    <SYSTEM>\r\n        <SYS_COMMAND>\r\n            <USER_COMM  state = \"request\"  type = \"lock\">UNLOCK</USER_COMM>\r\n        </SYS_COMMAND>\r\n    </SYSTEM>\r\n</IFBOX>\r\n",
+
+  "enabled": true,
+  "reject_status": 503,
+  "reject_reason": "Service Unavailable",
+
+  "http_listen": "127.0.0.1:18080",
+  "inbound_message_buffer": 100
+}

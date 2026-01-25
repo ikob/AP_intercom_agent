@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026, Katsushi Kobayashi
 //
 // Entry point.
-// - Reads JSON config, then overrides via flags, then positional URIs override both.
+// - Loads JSON config only when -config is provided, then overrides via flags.
 // - Runs SIP agent (diago + sipgo).
 // - Optionally runs an HTTP control plane for enable/disable + config retrieval.
 

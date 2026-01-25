@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,7 +29,7 @@ type Agent struct {
 	entranceRecipient sip.Uri
 
 	ua  *sipgo.UserAgent
-	cli *sipgo.Client
+	cli sipClient
 	srv *sipgo.Server
 	tu  *diago.Diago
 
@@ -39,8 +41,15 @@ type Agent struct {
 	regCancel context.CancelFunc
 	regDone   chan struct{}
 
-	msgBuf *MessageBuffer
-	regID  uint64
+	msgBuf         *MessageBuffer
+	regID          uint64
+	registerLoopFn func(context.Context) error
+}
+
+type sipClient interface {
+	Do(ctx context.Context, req *sip.Request, opts ...sipgo.ClientRequestOption) (*sip.Response, error)
+	DoDigestAuth(ctx context.Context, req *sip.Request, res *sip.Response, auth sipgo.DigestAuth) (*sip.Response, error)
+	Close() error
 }
 
 func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
@@ -90,6 +99,7 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 	}
 	a.answerEnabled.Store(cfg.AnswerCalls)
 	a.messageEnabled.Store(cfg.SendMessages)
+	a.registerLoopFn = a.registerLoop
 
 	// Buffer inbound MESSAGE and always return 200 OK.
 	a.srv.OnMessage(func(req *sip.Request, tx sip.ServerTransaction) {
@@ -139,9 +149,6 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 func (a *Agent) Close() {
 	// Stop register loop if running (best-effort).
 	a.stopRegisterLoop()
-
-	// Optional: if you REALLY want to unregister on shutdown, call tryUnregister here.
-	// a.tryUnregister(context.Background())
 
 	_ = a.cli.Close()
 	_ = a.srv.Close()
@@ -194,7 +201,6 @@ func (a *Agent) Run(ctx context.Context) error {
 		})
 	}()
 
-	// Optional: initial MESSAGE
 	if a.messageEnabled.Load() {
 		if err := a.sendMessage(ctx, a.messageRecipient, a.cfg.MessageContentType, []byte(a.cfg.MessageBody)); err != nil {
 			slog.Error("Failed to send initial MESSAGE", "error", err)
@@ -247,7 +253,6 @@ func (a *Agent) callerAllowedFromInvite(inDialog *diago.DialogServerSession) boo
 }
 
 // SetEnabled toggles a runtime boolean (pointer required).
-// NOTE: This NO LONGER controls registration loop (registration is always on by requirement).
 func (a *Agent) SetEnabled(target *atomic.Bool, enabled bool) {
 	_ = target.Swap(enabled)
 }
@@ -281,7 +286,7 @@ func (a *Agent) startRegisterLoop(appCtx context.Context) {
 			a.regMu.Unlock()
 		}()
 
-		if err := a.registerLoop(regCtx); err != nil {
+		if err := a.registerLoopFn(regCtx); err != nil {
 			if regCtx.Err() != nil {
 				slog.Info("REGISTER loop stopped (canceled)")
 				return
@@ -355,18 +360,9 @@ func (a *Agent) sendMessage(ctx context.Context, target sip.Uri, ctype string, b
 }
 
 func (a *Agent) registerLoop(ctx context.Context) error {
-	expiry := a.cfg.Expiry.Duration
-	if expiry <= 0 {
-		expiry = 3600 * time.Second
-	}
-
-	// refresh は少し手前（固定60秒 or expiry/3 の小さい方）
-	refreshBefore := 60 * time.Second
-	if expiry/3 < refreshBefore {
-		refreshBefore = expiry / 3
-	}
-	if refreshBefore < 5*time.Second {
-		refreshBefore = 5 * time.Second
+	baseExpiry := a.cfg.Expiry.Duration
+	if baseExpiry <= 0 {
+		baseExpiry = 3600 * time.Second
 	}
 
 	retry := a.cfg.RetryInterval.Duration
@@ -374,23 +370,39 @@ func (a *Agent) registerLoop(ctx context.Context) error {
 		retry = 60 * time.Second
 	}
 
-	// 初回はすぐ実行、その後は refresh タイミングで回す
+	// Run immediately once, then follow the refresh cadence.
+	expiry := baseExpiry
 	for {
-		// 1) expires=expiry で REGISTER（まず認証なし）
+		// 1) REGISTER with expires=expiry (no auth first).
 		res, err := a.doRegisterOnce(ctx, int(expiry.Seconds()))
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			slog.Error("REGISTER attempt failed", "error", err)
-			// retry 待ち
+			// Wait before retry.
 			if !sleepOrDone(ctx, retry) {
 				return ctx.Err()
 			}
 			continue
 		}
 
-		// 2) 次の refresh まで待つ
+		if res != nil {
+			if srvExp, ok := responseExpirySeconds(res); ok {
+				expiry = time.Duration(srvExp) * time.Second
+			} else {
+				expiry = baseExpiry
+			}
+		}
+
+		// 2) Wait until the next refresh window.
+		refreshBefore := 60 * time.Second
+		if expiry/3 < refreshBefore {
+			refreshBefore = expiry / 3
+		}
+		if refreshBefore < 5*time.Second {
+			refreshBefore = 5 * time.Second
+		}
 		wait := expiry - refreshBefore
 		if wait < 1*time.Second {
 			wait = 1 * time.Second
@@ -412,13 +424,13 @@ func (a *Agent) doRegisterOnce(ctx context.Context, expiresSec int) (*sip.Respon
 	req.AppendHeader(sip.NewHeader("Contact", a.contactHeaderValue()))
 	req.AppendHeader(sip.NewHeader("Expires", fmt.Sprintf("%d", expiresSec)))
 
-	// まず認証なしで送る
+	// Send without auth first.
 	res, err := a.cli.Do(ctx, req, sipgo.ClientRequestBuild)
 	if err != nil {
 		return nil, err
 	}
 
-	// 401/407 なら challenge に従って Digest 付けて再送
+	// If 401/407, resend with Digest auth.
 	if res.StatusCode == 401 || res.StatusCode == 407 {
 		auth := sipgo.DigestAuth{Username: a.cfg.Username, Password: a.cfg.Password}
 		res, err = a.cli.DoDigestAuth(ctx, req, res, auth)
@@ -433,6 +445,18 @@ func (a *Agent) doRegisterOnce(ctx context.Context, expiresSec int) (*sip.Respon
 
 	slog.Info("REGISTER ok", "expires", expiresSec)
 	return res, nil
+}
+
+func responseExpirySeconds(res *sip.Response) (int, bool) {
+	h := res.GetHeader("Expires")
+	if h == nil {
+		return 0, false
+	}
+	secs, err := strconv.Atoi(strings.TrimSpace(h.Value()))
+	if err != nil || secs <= 0 {
+		return 0, false
+	}
+	return secs, true
 }
 
 // helper: sleep that can be cancelled by ctx
