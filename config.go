@@ -67,6 +67,7 @@ type Config struct {
 
 	// SIP UA settings
 	UserAgentHostname string `json:"user_agent_hostname"`
+	LogLevel          string `json:"log_level"`
 
 	// Local bind for SIP server (diago transport)
 	BindHost string `json:"bind_host"`
@@ -119,6 +120,7 @@ func DefaultConfig() Config {
 	return Config{
 		ProxyHost:            "192.168.100.25:5060",
 		UserAgentHostname:    "192.168.100.25",
+		LogLevel:             "",
 		BindHost:             "0.0.0.0",
 		BindPort:             15060,
 		ContactHost:          "",
@@ -206,6 +208,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.StringVar(&cfg.Password, "password", cfg.Password, "Digest password (required)")
 	fs.StringVar(&cfg.ProxyHost, "proxy", cfg.ProxyHost, "Outbound proxy host:port (registrar) (required)")
 	fs.StringVar(&cfg.UserAgentHostname, "uahost", cfg.UserAgentHostname, "SIP User-Agent hostname")
+	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (debug, info, warn, error)")
 
 	fs.StringVar(&cfg.BindHost, "bind-host", cfg.BindHost, "Local bind host for SIP server transport")
 	fs.IntVar(&cfg.BindPort, "bind-port", cfg.BindPort, "Local bind port for SIP server transport")

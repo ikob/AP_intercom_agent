@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 )
@@ -48,5 +49,6 @@ func pickContactHost(contactHost, bindHost, proxyHost string) (string, error) {
 	ip := localAddr.IP.String()
 	// Normalize IPv6 zone if any (e.g., "fe80::1%en0").
 	ip = strings.Split(ip, "%")[0]
+	slog.Info("Inferred contact host", "contact_host", ip, "proxy_host", proxyHost)
 	return ip, nil
 }

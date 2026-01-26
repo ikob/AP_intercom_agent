@@ -82,11 +82,26 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 				return
 			}
 
+			prevAnswer := agent.answerEnabled.Load()
+			prevMessages := agent.messageEnabled.Load()
+			changed := false
+
 			if req.AnswerCalls != nil {
 				agent.SetAnswerEnabled(*req.AnswerCalls)
+				changed = true
 			}
 			if req.SendMessages != nil {
 				agent.SetMessageEnabled(*req.SendMessages)
+				changed = true
+			}
+
+			if changed {
+				slog.Info("HTTP state updated",
+					"prev_answer_calls", prevAnswer,
+					"prev_send_messages", prevMessages,
+					"answer_calls", agent.answerEnabled.Load(),
+					"send_messages", agent.messageEnabled.Load(),
+				)
 			}
 
 			w.Header().Set("Content-Type", "application/json")

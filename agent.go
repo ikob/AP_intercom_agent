@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,7 +17,7 @@ import (
 	"time"
 
 	"github.com/emiago/diago"
-	"github.com/emiago/diago/examples"
+	"github.com/emiago/diago/media"
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
 )
@@ -44,6 +45,7 @@ type Agent struct {
 	msgBuf         *MessageBuffer
 	regID          uint64
 	registerLoopFn func(context.Context) error
+	sleepFn        func(context.Context, time.Duration) bool
 }
 
 type sipClient interface {
@@ -66,7 +68,7 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 		return nil, fmt.Errorf("failed to parse entrance uri: %w", err)
 	}
 
-	examples.SetupLogger()
+	setupLogger(cfg.LogLevel)
 
 	useragent := cfg.Username
 	if useragent == "" {
@@ -100,6 +102,7 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 	a.answerEnabled.Store(cfg.AnswerCalls)
 	a.messageEnabled.Store(cfg.SendMessages)
 	a.registerLoopFn = a.registerLoop
+	a.sleepFn = sleepOrDone
 
 	// Buffer inbound MESSAGE and always return 200 OK.
 	a.srv.OnMessage(func(req *sip.Request, tx sip.ServerTransaction) {
@@ -144,6 +147,23 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 	)
 
 	return a, nil
+}
+
+func setupLogger(level string) {
+	if level == "" {
+		level = os.Getenv("LOG_LEVEL")
+	}
+
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		lvl = slog.LevelInfo
+	}
+	slog.SetLogLoggerLevel(lvl)
+
+	media.RTPDebug = os.Getenv("RTP_DEBUG") == "true"
+	media.RTCPDebug = os.Getenv("RTCP_DEBUG") == "true"
+	sip.SIPDebug = os.Getenv("SIP_DEBUG") == "true"
+	sip.TransactionFSMDebug = os.Getenv("SIP_TRANSACTION_DEBUG") == "true"
 }
 
 func (a *Agent) Close() {
@@ -215,17 +235,32 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) respondIncomingCall(ctx context.Context, inDialog *diago.DialogServerSession) error {
-	_ = inDialog.Trying()
-	slog.Info("Trying", "id", inDialog.ID)
+	return a.respondIncomingCallWith(ctx, inDialog.ID, inDialog)
+}
 
-	_ = inDialog.Ringing()
-	slog.Info("Ringing", "id", inDialog.ID)
+type dialogResponder interface {
+	Trying() error
+	Ringing() error
+	Answer() error
+	Hangup(ctx context.Context) error
+}
 
-	_ = inDialog.Answer()
-	slog.Info("Answered", "id", inDialog.ID)
+func (a *Agent) respondIncomingCallWith(ctx context.Context, id string, dialog dialogResponder) error {
+	_ = dialog.Trying()
+	slog.Info("Trying", "id", id)
+
+	_ = dialog.Ringing()
+	slog.Info("Ringing", "id", id)
+
+	_ = dialog.Answer()
+	slog.Info("Answered", "id", id)
 
 	time.Sleep(1 * time.Second)
-	_ = inDialog.Hangup(ctx)
+	if err := dialog.Hangup(ctx); err != nil {
+		slog.Debug("Hangup failed", "id", id, "error", err)
+	} else {
+		slog.Debug("Hangup sent", "id", id)
+	}
 	return nil
 }
 
@@ -275,6 +310,8 @@ func (a *Agent) startRegisterLoop(appCtx context.Context) {
 
 	a.regID++
 	myID := a.regID
+
+	slog.Info("REGISTER loop starting", "id", myID)
 
 	go func() {
 		defer func() {
@@ -346,6 +383,7 @@ func (a *Agent) sendMessage(ctx context.Context, target sip.Uri, ctype string, b
 	}
 
 	if res.StatusCode == 401 || res.StatusCode == 407 {
+		slog.Debug("MESSAGE auth required", "status", res.StatusCode, "target", target.String())
 		auth := sipgo.DigestAuth{Username: a.cfg.Username, Password: a.cfg.Password}
 		res, err = a.cli.DoDigestAuth(ctx, req, res, auth)
 		if err != nil {
@@ -354,8 +392,10 @@ func (a *Agent) sendMessage(ctx context.Context, target sip.Uri, ctype string, b
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		slog.Warn("MESSAGE failed", "status", res.StatusCode, "reason", res.Reason, "target", target.String())
 		return fmt.Errorf("MESSAGE failed: %d %s", res.StatusCode, res.Reason)
 	}
+	slog.Debug("MESSAGE sent", "target", target.String(), "content_type", ctype, "body_len", len(body))
 	return nil
 }
 
@@ -381,7 +421,7 @@ func (a *Agent) registerLoop(ctx context.Context) error {
 			}
 			slog.Error("REGISTER attempt failed", "error", err)
 			// Wait before retry.
-			if !sleepOrDone(ctx, retry) {
+			if !a.sleepFn(ctx, retry) {
 				return ctx.Err()
 			}
 			continue
@@ -389,8 +429,10 @@ func (a *Agent) registerLoop(ctx context.Context) error {
 
 		if res != nil {
 			if srvExp, ok := responseExpirySeconds(res); ok {
+				slog.Debug("REGISTER expires from response", "server_expires", srvExp, "base_expires", int(baseExpiry.Seconds()))
 				expiry = time.Duration(srvExp) * time.Second
 			} else {
+				slog.Debug("REGISTER expires not provided; using base", "base_expires", int(baseExpiry.Seconds()))
 				expiry = baseExpiry
 			}
 		}
@@ -407,7 +449,7 @@ func (a *Agent) registerLoop(ctx context.Context) error {
 		if wait < 1*time.Second {
 			wait = 1 * time.Second
 		}
-		if !sleepOrDone(ctx, wait) {
+		if !a.sleepFn(ctx, wait) {
 			return ctx.Err()
 		}
 
@@ -443,20 +485,51 @@ func (a *Agent) doRegisterOnce(ctx context.Context, expiresSec int) (*sip.Respon
 		return res, fmt.Errorf("REGISTER failed: %d %s", res.StatusCode, res.Reason)
 	}
 
-	slog.Info("REGISTER ok", "expires", expiresSec)
+	slog.Debug("REGISTER ok", "expires", expiresSec)
 	return res, nil
 }
 
 func responseExpirySeconds(res *sip.Response) (int, bool) {
-	h := res.GetHeader("Expires")
-	if h == nil {
+	secs := []int{}
+
+	if h := res.GetHeader("Expires"); h != nil {
+		if v, ok := parseExpiryValue(h.Value()); ok {
+			secs = append(secs, v)
+		}
+	}
+
+	if c := res.Contact(); c != nil && c.Params != nil {
+		if v, ok := parseExpiryParam(c.Params.Get("expires")); ok {
+			secs = append(secs, v)
+		}
+	}
+
+	if len(secs) == 0 {
 		return 0, false
 	}
-	secs, err := strconv.Atoi(strings.TrimSpace(h.Value()))
+
+	min := secs[0]
+	for _, v := range secs[1:] {
+		if v < min {
+			min = v
+		}
+	}
+	return min, true
+}
+
+func parseExpiryValue(value string) (int, bool) {
+	secs, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil || secs <= 0 {
 		return 0, false
 	}
 	return secs, true
+}
+
+func parseExpiryParam(value string, ok bool) (int, bool) {
+	if !ok {
+		return 0, false
+	}
+	return parseExpiryValue(value)
 }
 
 // helper: sleep that can be cancelled by ctx

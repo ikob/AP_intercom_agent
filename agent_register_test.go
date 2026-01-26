@@ -239,3 +239,62 @@ func TestResponseExpirySeconds(t *testing.T) {
 		t.Fatal("expected invalid Expires to be rejected")
 	}
 }
+
+func TestResponseExpirySecondsFromContactParam(t *testing.T) {
+	req := sip.NewRequest(sip.REGISTER, sip.Uri{User: "agent", Host: "localhost"})
+	res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+	res.AppendHeader(sip.NewHeader("Contact", "<sip:agent@localhost>;expires=1200"))
+
+	secs, ok := responseExpirySeconds(res)
+	if !ok || secs != 1200 {
+		t.Fatalf("expected 1200 true, got %d %v", secs, ok)
+	}
+}
+
+func TestResponseExpirySecondsUsesShorterValue(t *testing.T) {
+	req := sip.NewRequest(sip.REGISTER, sip.Uri{User: "agent", Host: "localhost"})
+	res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+	res.AppendHeader(sip.NewHeader("Expires", "3600"))
+	res.AppendHeader(sip.NewHeader("Contact", "<sip:agent@localhost>;expires=1200"))
+
+	secs, ok := responseExpirySeconds(res)
+	if !ok || secs != 1200 {
+		t.Fatalf("expected 1200 true, got %d %v", secs, ok)
+	}
+}
+
+func TestRegisterLoopWaitUsesResponseExpiry(t *testing.T) {
+	port := freeUDPPort(t)
+	cfg := testConfig(port)
+	cfg.Expiry.Duration = 30 * time.Second
+	cfg.RetryInterval.Duration = 10 * time.Second
+
+	agent, err := NewAgent(cfg, NewMessageBuffer(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeClient{
+		doFn: func(_ context.Context, req *sip.Request) (*sip.Response, error) {
+			res := sip.NewResponseFromRequest(req, 200, "OK", nil)
+			res.AppendHeader(sip.NewHeader("Expires", "12"))
+			return res, nil
+		},
+	}
+	agent.cli = fake
+
+	waitCh := make(chan time.Duration, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	agent.sleepFn = func(_ context.Context, d time.Duration) bool {
+		waitCh <- d
+		cancel()
+		return false
+	}
+
+	_ = agent.registerLoop(ctx)
+
+	wait := <-waitCh
+	if wait < 7*time.Second || wait > 9*time.Second {
+		t.Fatalf("expected wait about 8s, got %v", wait)
+	}
+}

@@ -23,6 +23,10 @@ func freeUDPPort(t *testing.T) int {
 }
 
 func startUAC(t *testing.T) (*sipgo.Client, string, func()) {
+	return startUACWithBye(t, nil)
+}
+
+func startUACWithBye(t *testing.T, byeCh chan<- *sip.Request) (*sipgo.Client, string, func()) {
 	t.Helper()
 
 	l, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
@@ -46,6 +50,9 @@ func startUAC(t *testing.T) (*sipgo.Client, string, func()) {
 		t.Fatal(err)
 	}
 	srv.OnBye(func(req *sip.Request, tx sip.ServerTransaction) {
+		if byeCh != nil {
+			byeCh <- req
+		}
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
 	})
 
