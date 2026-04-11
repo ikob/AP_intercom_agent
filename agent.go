@@ -34,8 +34,9 @@ type Agent struct {
 	srv *sipgo.Server
 	tu  *diago.Diago
 
-	answerEnabled  atomic.Bool // controls Answer vs Reject
-	messageEnabled atomic.Bool // controls MESSAGE sending
+	answerEnabled        atomic.Bool // controls Answer vs Reject
+	messageEnabled       atomic.Bool // controls MESSAGE sending
+	answerMessageEnabled atomic.Bool // controls entrance MESSAGE + delay behavior
 
 	// Registration loop cancellation so we can stop it before Unregister().
 	regMu     sync.Mutex
@@ -54,6 +55,7 @@ type sipClient interface {
 	Close() error
 }
 
+// NewAgent constructs SIP client/server state and wires handlers from config.
 func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 	recipient := sip.Uri{}
 	if err := sip.ParseUri(cfg.RegisterURI, &recipient); err != nil {
@@ -101,6 +103,7 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 	}
 	a.answerEnabled.Store(cfg.AnswerCalls)
 	a.messageEnabled.Store(cfg.SendMessages)
+	a.answerMessageEnabled.Store(cfg.AnswerMessage)
 	a.registerLoopFn = a.registerLoop
 	a.sleepFn = sleepOrDone
 
@@ -149,6 +152,7 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 	return a, nil
 }
 
+// setupLogger configures slog and SIP/media debug switches from config/env.
 func setupLogger(level string) {
 	if level == "" {
 		level = os.Getenv("LOG_LEVEL")
@@ -166,6 +170,7 @@ func setupLogger(level string) {
 	sip.TransactionFSMDebug = os.Getenv("SIP_TRANSACTION_DEBUG") == "true"
 }
 
+// Close stops background work and closes SIP resources in best-effort order.
 func (a *Agent) Close() {
 	// Stop register loop if running (best-effort).
 	a.stopRegisterLoop()
@@ -175,6 +180,7 @@ func (a *Agent) Close() {
 	_ = a.ua.Close()
 }
 
+// regOpts builds REGISTER option values from the current agent configuration.
 func (a *Agent) regOpts() diago.RegisterOptions {
 	return diago.RegisterOptions{
 		Username:      a.cfg.Username,
@@ -185,6 +191,7 @@ func (a *Agent) regOpts() diago.RegisterOptions {
 	}
 }
 
+// Run starts INVITE handling, optional MESSAGE send, and the REGISTER loop.
 func (a *Agent) Run(ctx context.Context) error {
 	// Start INVITE handling.
 	go func() {
@@ -199,12 +206,19 @@ func (a *Agent) Run(ctx context.Context) error {
 				return
 			}
 
-			// Send entrance MESSAGE on incoming call regardless of AnswerCalls,
-			// as long as send_messages is enabled.
-			if a.messageEnabled.Load() {
+			// Send entrance MESSAGE on incoming call.
+			// answer_message=true forces entrance MESSAGE even if send_messages=false.
+			answerMessageEnabled := a.answerMessageEnabled.Load()
+			sendEntranceMessage := a.messageEnabled.Load() || answerMessageEnabled
+			if sendEntranceMessage {
 				if err := a.sendMessage(ctx, a.entranceRecipient, a.cfg.EntranceContentType, []byte(a.cfg.EntranceBody)); err != nil {
 					slog.Error("Failed to send entrance MESSAGE", "error", err)
 				}
+			}
+
+			// answer_message=true delays call handling by 1 second after entrance MESSAGE.
+			if answerMessageEnabled && !a.sleepFn(ctx, 1*time.Second) {
+				return
 			}
 
 			// If we do not answer calls, reject INVITE but keep registration alive.
@@ -234,6 +248,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	return nil
 }
 
+// respondIncomingCall bridges the concrete dialog type to the generic responder.
 func (a *Agent) respondIncomingCall(ctx context.Context, inDialog *diago.DialogServerSession) error {
 	return a.respondIncomingCallWith(ctx, inDialog.ID, inDialog)
 }
@@ -245,6 +260,7 @@ type dialogResponder interface {
 	Hangup(ctx context.Context) error
 }
 
+// respondIncomingCallWith performs Trying/Ringing/Answer then hangs up shortly after.
 func (a *Agent) respondIncomingCallWith(ctx context.Context, id string, dialog dialogResponder) error {
 	_ = dialog.Trying()
 	slog.Info("Trying", "id", id)
@@ -264,6 +280,7 @@ func (a *Agent) respondIncomingCallWith(ctx context.Context, id string, dialog d
 	return nil
 }
 
+// callerAllowedFromInvite enforces caller-user filtering against AllowedCallers.
 func (a *Agent) callerAllowedFromInvite(inDialog *diago.DialogServerSession) bool {
 	if len(a.cfg.AllowedCallers) == 0 {
 		return true // Whitelist is empty, allow all
@@ -287,14 +304,21 @@ func (a *Agent) callerAllowedFromInvite(inDialog *diago.DialogServerSession) boo
 	return slices.Contains(a.cfg.AllowedCallers, u)
 }
 
-// SetEnabled toggles a runtime boolean (pointer required).
+// SetEnabled atomically updates a runtime boolean flag.
 func (a *Agent) SetEnabled(target *atomic.Bool, enabled bool) {
 	_ = target.Swap(enabled)
 }
 
-func (a *Agent) SetAnswerEnabled(enabled bool)  { a.SetEnabled(&a.answerEnabled, enabled) }
+// SetAnswerEnabled updates whether inbound INVITE requests are answered.
+func (a *Agent) SetAnswerEnabled(enabled bool) { a.SetEnabled(&a.answerEnabled, enabled) }
+
+// SetMessageEnabled updates whether outbound MESSAGE sending is enabled.
 func (a *Agent) SetMessageEnabled(enabled bool) { a.SetEnabled(&a.messageEnabled, enabled) }
 
+// SetAnswerMessageEnabled updates whether entrance MESSAGE + delay behavior is enabled.
+func (a *Agent) SetAnswerMessageEnabled(enabled bool) { a.SetEnabled(&a.answerMessageEnabled, enabled) }
+
+// startRegisterLoop starts the REGISTER refresh goroutine if not already running.
 func (a *Agent) startRegisterLoop(appCtx context.Context) {
 	a.regMu.Lock()
 	defer a.regMu.Unlock()
@@ -334,6 +358,7 @@ func (a *Agent) startRegisterLoop(appCtx context.Context) {
 	}()
 }
 
+// stopRegisterLoop cancels and waits for the active REGISTER loop.
 func (a *Agent) stopRegisterLoop() {
 	a.regMu.Lock()
 	cancel := a.regCancel
@@ -350,6 +375,7 @@ func (a *Agent) stopRegisterLoop() {
 	}
 }
 
+// tryUnregister sends a best-effort SIP unregister transaction with timeout.
 func (a *Agent) tryUnregister(ctx context.Context) {
 	uctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -366,10 +392,12 @@ func (a *Agent) tryUnregister(ctx context.Context) {
 	slog.Info("Unregistered successfully")
 }
 
+// contactHeaderValue formats the Contact header URI and configured parameters.
 func (a *Agent) contactHeaderValue() string {
 	return fmt.Sprintf("<sip:%s@%s:%d>%s", a.cfg.Username, a.cfg.ContactHost, a.cfg.ContactPort, a.cfg.ContactParams)
 }
 
+// sendMessage sends a SIP MESSAGE request and retries once with digest auth if needed.
 func (a *Agent) sendMessage(ctx context.Context, target sip.Uri, ctype string, body []byte) error {
 	req := sip.NewRequest(sip.MESSAGE, target)
 
@@ -399,6 +427,7 @@ func (a *Agent) sendMessage(ctx context.Context, target sip.Uri, ctype string, b
 	return nil
 }
 
+// registerLoop keeps REGISTER refreshed, retrying on failure until context cancellation.
 func (a *Agent) registerLoop(ctx context.Context) error {
 	baseExpiry := a.cfg.Expiry.Duration
 	if baseExpiry <= 0 {
@@ -458,6 +487,7 @@ func (a *Agent) registerLoop(ctx context.Context) error {
 	}
 }
 
+// doRegisterOnce performs one REGISTER exchange, including digest auth retry.
 func (a *Agent) doRegisterOnce(ctx context.Context, expiresSec int) (*sip.Response, error) {
 	// IMPORTANT: request is ALWAYS newly created (do not reuse).
 	req := sip.NewRequest(sip.REGISTER, a.recipient)
@@ -489,6 +519,7 @@ func (a *Agent) doRegisterOnce(ctx context.Context, expiresSec int) (*sip.Respon
 	return res, nil
 }
 
+// responseExpirySeconds extracts the effective expiry (minimum) from REGISTER response headers.
 func responseExpirySeconds(res *sip.Response) (int, bool) {
 	secs := []int{}
 
@@ -517,6 +548,7 @@ func responseExpirySeconds(res *sip.Response) (int, bool) {
 	return min, true
 }
 
+// parseExpiryValue parses a positive integer seconds value from text.
 func parseExpiryValue(value string) (int, bool) {
 	secs, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil || secs <= 0 {
@@ -525,6 +557,7 @@ func parseExpiryValue(value string) (int, bool) {
 	return secs, true
 }
 
+// parseExpiryParam parses an optional expires parameter when present.
 func parseExpiryParam(value string, ok bool) (int, bool) {
 	if !ok {
 		return 0, false
@@ -532,7 +565,7 @@ func parseExpiryParam(value string, ok bool) (int, bool) {
 	return parseExpiryValue(value)
 }
 
-// helper: sleep that can be cancelled by ctx
+// sleepOrDone sleeps for d unless the context is canceled first.
 func sleepOrDone(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()

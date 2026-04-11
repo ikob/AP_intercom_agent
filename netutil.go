@@ -10,11 +10,7 @@ import (
 	"strings"
 )
 
-// pickContactHost tries to choose a reachable local IP for Contact.
-// Priority:
-//  1. If contactHost is already set, use it.
-//  2. If bindHost is a specific IP (not 0.0.0.0), use it.
-//  3. Otherwise, infer local IP by "dialing" the proxy (no packets need to be sent).
+// pickContactHost picks the Contact host using explicit value, bind host, or proxy-route inference.
 func pickContactHost(contactHost, bindHost, proxyHost string) (string, error) {
 	if contactHost != "" {
 		return contactHost, nil

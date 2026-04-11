@@ -33,6 +33,7 @@ func startHTTPTestServer(t *testing.T) (string, context.CancelFunc, *Agent, *Con
 	agent := &Agent{}
 	agent.answerEnabled.Store(true)
 	agent.messageEnabled.Store(false)
+	agent.answerMessageEnabled.Store(false)
 
 	cfg := DefaultConfig()
 	cfg.LoadedConfigPath = "/tmp/config.json"
@@ -121,11 +122,11 @@ func TestHTTPStateAndMessages(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&state); err != nil {
 		t.Fatalf("decode state: %v", err)
 	}
-	if state["answer_calls"] != true || state["send_messages"] != false {
+	if state["answer_calls"] != true || state["send_messages"] != false || state["answer_message"] != false {
 		t.Fatalf("unexpected state: %#v", state)
 	}
 
-	body := []byte(`{"answer_calls": false, "send_messages": true}`)
+	body := []byte(`{"answer_calls": false, "send_messages": true, "answer_message": true}`)
 	res, err = client.Post(baseURL+"/v1/state", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("state post: %v", err)
@@ -134,8 +135,8 @@ func TestHTTPStateAndMessages(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("state post status: %d", res.StatusCode)
 	}
-	if agent.answerEnabled.Load() || !agent.messageEnabled.Load() {
-		t.Fatalf("agent flags not updated: answer=%v send=%v", agent.answerEnabled.Load(), agent.messageEnabled.Load())
+	if agent.answerEnabled.Load() || !agent.messageEnabled.Load() || !agent.answerMessageEnabled.Load() {
+		t.Fatalf("agent flags not updated: answer=%v send=%v answer_message=%v", agent.answerEnabled.Load(), agent.messageEnabled.Load(), agent.answerMessageEnabled.Load())
 	}
 
 	res, err = client.Get(baseURL + "/v1/messages")

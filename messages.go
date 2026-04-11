@@ -28,6 +28,7 @@ type MessageBuffer struct {
 	full bool
 }
 
+// NewMessageBuffer allocates a fixed-size ring buffer for inbound SIP MESSAGE records.
 func NewMessageBuffer(capacity int) *MessageBuffer {
 	if capacity <= 0 {
 		capacity = 100
@@ -38,6 +39,7 @@ func NewMessageBuffer(capacity int) *MessageBuffer {
 	}
 }
 
+// Add writes one inbound message into the ring buffer with overwrite-on-full behavior.
 func (b *MessageBuffer) Add(m InboundMessage) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

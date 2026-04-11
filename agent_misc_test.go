@@ -41,16 +41,18 @@ func TestSetEnabled(t *testing.T) {
 	}
 }
 
-func TestSetAnswerAndMessageEnabled(t *testing.T) {
+func TestSetAnswerMessageFlagsEnabled(t *testing.T) {
 	a := &Agent{}
 	a.answerEnabled.Store(false)
 	a.messageEnabled.Store(false)
+	a.answerMessageEnabled.Store(false)
 
 	a.SetAnswerEnabled(true)
 	a.SetMessageEnabled(true)
+	a.SetAnswerMessageEnabled(true)
 
-	if !a.answerEnabled.Load() || !a.messageEnabled.Load() {
-		t.Fatalf("expected both flags true: answer=%v message=%v", a.answerEnabled.Load(), a.messageEnabled.Load())
+	if !a.answerEnabled.Load() || !a.messageEnabled.Load() || !a.answerMessageEnabled.Load() {
+		t.Fatalf("expected all flags true: answer=%v message=%v answer_message=%v", a.answerEnabled.Load(), a.messageEnabled.Load(), a.answerMessageEnabled.Load())
 	}
 }
 
