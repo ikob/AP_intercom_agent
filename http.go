@@ -47,7 +47,7 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 			"config":      cfg,
 			"runtime": map[string]any{
 				"answer_calls":   agent.answerEnabled.Load(),
-				"send_massage":   agent.messageEnabled.Load(),
+				"send_message":   agent.messageEnabled.Load(),
 				"answer_message": agent.answerMessageEnabled.Load(),
 			},
 		}
@@ -66,7 +66,7 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"answer_calls":   agent.answerEnabled.Load(),
-				"send_massage":   agent.messageEnabled.Load(),
+				"send_message":   agent.messageEnabled.Load(),
 				"answer_message": agent.answerMessageEnabled.Load(),
 			})
 			return
@@ -78,7 +78,7 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 			// pointer bool
 			var req struct {
 				AnswerCalls   *bool `json:"answer_calls"`
-				SendMassage   *bool `json:"send_massage"`
+				SendMessage   *bool `json:"send_message"`
 				AnswerMessage *bool `json:"answer_message"`
 			}
 			if err := json.Unmarshal(body, &req); err != nil {
@@ -95,8 +95,8 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 				agent.SetAnswerEnabled(*req.AnswerCalls)
 				changed = true
 			}
-			if req.SendMassage != nil {
-				agent.SetMessageEnabled(*req.SendMassage)
+			if req.SendMessage != nil {
+				agent.SetMessageEnabled(*req.SendMessage)
 				changed = true
 			}
 			if req.AnswerMessage != nil {
@@ -107,10 +107,10 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 			if changed {
 				slog.Info("HTTP state updated",
 					"prev_answer_calls", prevAnswer,
-					"prev_send_massage", prevMessages,
+					"prev_send_message", prevMessages,
 					"prev_answer_message", prevAnswerMessage,
 					"answer_calls", agent.answerEnabled.Load(),
-					"send_massage", agent.messageEnabled.Load(),
+					"send_message", agent.messageEnabled.Load(),
 					"answer_message", agent.answerMessageEnabled.Load(),
 				)
 			}
@@ -118,7 +118,7 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"answer_calls":   agent.answerEnabled.Load(),
-				"send_massage":   agent.messageEnabled.Load(),
+				"send_message":   agent.messageEnabled.Load(),
 				"answer_message": agent.answerMessageEnabled.Load(),
 			})
 			return
