@@ -8,10 +8,9 @@
 // - Config file is loaded ONLY when -config is explicitly provided (no implicit ./config.json).
 // - Flags override JSON config.
 // - URI hiding/refactor is postponed (keep register_uri/message_uri/entrance_uri as-is).
-// - Split "enabled" into dedicated toggles:
+// - Split "enabled" into 2 toggles:
 //     * answer_calls: whether to Answer INVITE (otherwise reject)
 //     * send_messages: whether to send MESSAGE (initial/entrance)
-//     * answer_message: whether to send entrance MESSAGE and wait 1s before handling INVITE
 //
 // Notes:
 // - Allowed callers can be specified multiple times: --allowed-caller alice --allowed-caller bob
@@ -35,7 +34,6 @@ type Duration struct {
 	time.Duration
 }
 
-// UnmarshalJSON parses a duration from either a JSON string or numeric seconds.
 func (d *Duration) UnmarshalJSON(b []byte) error {
 	// Try string first.
 	var s string
@@ -57,7 +55,6 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// MarshalJSON serializes a duration as a JSON string (for example, "30s").
 func (d Duration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(d.Duration.String())
 }
@@ -99,9 +96,8 @@ type Config struct {
 	EntranceBody        string `json:"entrance_body"`
 
 	// Behavior toggles
-	AnswerCalls   bool `json:"answer_calls"`
-	SendMessages  bool `json:"send_messages"`
-	AnswerMessage bool `json:"answer_message"`
+	AnswerCalls  bool `json:"answer_calls"`
+	SendMessages bool `json:"send_messages"`
 
 	// Reject behavior when not answering
 	RejectStatus int    `json:"reject_status"` // 480 or 503
@@ -120,7 +116,6 @@ type Config struct {
 	LoadedConfigPath string `json:"-"`
 }
 
-// DefaultConfig returns baseline runtime defaults before file/flag overrides.
 func DefaultConfig() Config {
 	return Config{
 		ProxyHost:            "192.168.100.25:5060",
@@ -135,7 +130,6 @@ func DefaultConfig() Config {
 		RetryInterval:        Duration{Duration: 30 * time.Second},
 		AnswerCalls:          true,
 		SendMessages:         true,
-		AnswerMessage:        false,
 		RejectStatus:         503,
 		RejectReason:         "Service Unavailable",
 		HTTPListen:           "127.0.0.1:18080",
@@ -147,7 +141,6 @@ func DefaultConfig() Config {
 	}
 }
 
-// LoadConfigFile reads config JSON from path and overlays it on defaults.
 func LoadConfigFile(path string) (Config, error) {
 	cfg := DefaultConfig()
 	if path == "" {
@@ -163,7 +156,6 @@ func LoadConfigFile(path string) (Config, error) {
 	return cfg, nil
 }
 
-// SaveConfigJSON encodes config-like data as pretty JSON without HTML escaping.
 func SaveConfigJSON(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -175,12 +167,12 @@ func SaveConfigJSON(v any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// missingRequiredError builds a single validation error for missing keys.
 func missingRequiredError(missing []string) error {
 	return fmt.Errorf("missing required: %s", strings.Join(missing, ", "))
 }
 
-// ParseFlags applies flag parsing and optional config-file loading with validation.
+// ParseFlags loads JSON config only when -config is explicitly provided,
+// then applies flag overrides. Positional args are NOT supported.
 func ParseFlags(args []string) (Config, error) {
 	// First pass: find -config in argv without full flag parsing.
 	configPath := ""
@@ -230,7 +222,6 @@ func ParseFlags(args []string) (Config, error) {
 
 	fs.BoolVar(&cfg.AnswerCalls, "answer-calls", cfg.AnswerCalls, "Answer incoming INVITE calls")
 	fs.BoolVar(&cfg.SendMessages, "send-messages", cfg.SendMessages, "Send SIP MESSAGE (initial/entrance)")
-	fs.BoolVar(&cfg.AnswerMessage, "answer-message", cfg.AnswerMessage, "Send entrance MESSAGE then wait 1s before following answer-calls behavior")
 
 	fs.IntVar(&cfg.RejectStatus, "reject-code", cfg.RejectStatus, "Reject status code when not answering (480 or 503)")
 	fs.StringVar(&cfg.RejectReason, "reject-reason", cfg.RejectReason, "Reject reason phrase when not answering")
@@ -303,7 +294,6 @@ func ParseFlags(args []string) (Config, error) {
 
 type StringList []string
 
-// String joins the list values as a comma-separated string.
 func (s *StringList) String() string {
 	if s == nil {
 		return ""
@@ -311,7 +301,6 @@ func (s *StringList) String() string {
 	return strings.Join(*s, ",")
 }
 
-// Set appends a trimmed non-empty value to the string list.
 func (s *StringList) Set(v string) error {
 	v = strings.TrimSpace(v)
 	if v == "" {

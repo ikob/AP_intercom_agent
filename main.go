@@ -15,7 +15,6 @@ import (
 	"os/signal"
 )
 
-// main initializes config and services, then runs until interrupted.
 func main() {
 	cfg, err := ParseFlags(os.Args[1:])
 	if err != nil {
