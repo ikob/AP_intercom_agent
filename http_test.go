@@ -122,11 +122,11 @@ func TestHTTPStateAndMessages(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&state); err != nil {
 		t.Fatalf("decode state: %v", err)
 	}
-	if state["answer_calls"] != true || state["send_messages"] != false || state["answer_message"] != false {
+	if state["answer_calls"] != true || state["send_massage"] != false || state["answer_message"] != false {
 		t.Fatalf("unexpected state: %#v", state)
 	}
 
-	body := []byte(`{"answer_calls": false, "send_messages": true, "answer_message": true}`)
+	body := []byte(`{"answer_calls": false, "send_massage": true, "answer_message": true}`)
 	res, err = client.Post(baseURL+"/v1/state", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("state post: %v", err)

@@ -207,7 +207,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 
 			// Send entrance MESSAGE on incoming call.
-			// answer_message=true forces entrance MESSAGE even if send_messages=false.
+			// answer_message=true forces entrance MESSAGE even if send_massage=false.
 			answerMessageEnabled := a.answerMessageEnabled.Load()
 			sendEntranceMessage := a.messageEnabled.Load() || answerMessageEnabled
 			if sendEntranceMessage {

@@ -10,7 +10,7 @@
 // - URI hiding/refactor is postponed (keep register_uri/message_uri/entrance_uri as-is).
 // - Split "enabled" into dedicated toggles:
 //     * answer_calls: whether to Answer INVITE (otherwise reject)
-//     * send_messages: whether to send MESSAGE (initial/entrance)
+//     * send_massage: whether to send MESSAGE (initial/entrance)
 //     * answer_message: whether to send entrance MESSAGE and wait 1s before handling INVITE
 //
 // Notes:
@@ -100,7 +100,7 @@ type Config struct {
 
 	// Behavior toggles
 	AnswerCalls   bool `json:"answer_calls"`
-	SendMessages  bool `json:"send_messages"`
+	SendMessages  bool `json:"send_massage"`
 	AnswerMessage bool `json:"answer_message"`
 
 	// Reject behavior when not answering
@@ -229,7 +229,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.DurationVar(&cfg.RetryInterval.Duration, "retry", cfg.RetryInterval.Duration, "REGISTER retry interval (e.g. 60s)")
 
 	fs.BoolVar(&cfg.AnswerCalls, "answer-calls", cfg.AnswerCalls, "Answer incoming INVITE calls")
-	fs.BoolVar(&cfg.SendMessages, "send-messages", cfg.SendMessages, "Send SIP MESSAGE (initial/entrance)")
+	fs.BoolVar(&cfg.SendMessages, "send-massage", cfg.SendMessages, "Send SIP MESSAGE (initial/entrance)")
 	fs.BoolVar(&cfg.AnswerMessage, "answer-message", cfg.AnswerMessage, "Send entrance MESSAGE then wait 1s before following answer-calls behavior")
 
 	fs.IntVar(&cfg.RejectStatus, "reject-code", cfg.RejectStatus, "Reject status code when not answering (480 or 503)")
