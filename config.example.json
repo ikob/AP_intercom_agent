@@ -19,16 +19,33 @@
   "message_uri": "sip:message@example.com",
   "entrance_uri": "sip:entrance@example.com",
 
+  "monitor_probe": false,
+  "monitor_uri": "sip:monitor@192.168.100.25",
+  "monitor_hold": "5s",
+  "monitor_repeat": 1,
+  "monitor_jpeg_out": "",
+  "monitor_jpeg_interval": "1s",
+  "jpeg_query_s": "cd188d8e518cb12ad7a644f23928f64f",
+
+  "incoming_jpeg_dir": "",
+  "incoming_jpeg_hold": "5s",
+  "incoming_jpeg_interval": "1s",
+  "incoming_jpeg_max_files": 100,
+
   "message_content_type": "application/intercom.message+xml",
   "message_body": "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><IFBOX version = \"1.0\"><SYSTEM><SYS_COMMAND><USER_COMM  state = \"request\"  type = \"housing\">ALL</USER_COMM></SYS_COMMAND></SYSTEM></IFBOX>",
 
   "entrance_content_type": "application/intercom.message+xml",
   "entrance_body": "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\r\n<IFBOX version = \"1.0\">\r\n    <SYSTEM>\r\n        <SYS_COMMAND>\r\n            <USER_COMM  state = \"request\"  type = \"lock\">UNLOCK</USER_COMM>\r\n        </SYS_COMMAND>\r\n    </SYSTEM>\r\n</IFBOX>\r\n",
 
-  "enabled": true,
+  "answer_calls": true,
+  "send_messages": true,
   "reject_status": 503,
   "reject_reason": "Service Unavailable",
 
   "http_listen": "127.0.0.1:18080",
-  "inbound_message_buffer": 100
+  "inbound_message_buffer": 100,
+
+  "allowed_callers": ["interphone0", "interphone1"],
+  "unlock_callers": ["interphone0"]
 }

@@ -54,6 +54,33 @@ func TestSetAnswerAndMessageEnabled(t *testing.T) {
 	}
 }
 
+func TestIncomingJPEGCaptureRequiresAutomaticUnlock(t *testing.T) {
+	a := &Agent{cfg: Config{IncomingJPEGDir: "/tmp/aiphone-rings"}}
+	if a.shouldCaptureIncomingJPEG(false) {
+		t.Fatal("capture must be disabled while automatic unlock is off")
+	}
+	if !a.shouldCaptureIncomingJPEG(true) {
+		t.Fatal("capture must be enabled while automatic unlock is on")
+	}
+	a.cfg.IncomingJPEGDir = ""
+	if a.shouldCaptureIncomingJPEG(true) {
+		t.Fatal("capture must be disabled without an output directory")
+	}
+}
+
+func TestUnlockCallerAllowList(t *testing.T) {
+	a := &Agent{cfg: DefaultConfig()}
+	if !a.unlockCallerAllowed("interphone0") {
+		t.Fatal("interphone0 must be eligible for automatic unlock by default")
+	}
+	if a.unlockCallerAllowed("interphone1") {
+		t.Fatal("interphone1 must never be unlocked by default")
+	}
+	if a.unlockCallerAllowed("") {
+		t.Fatal("an unknown caller must not be unlocked")
+	}
+}
+
 func TestRegOpts(t *testing.T) {
 	a := &Agent{
 		cfg: Config{
@@ -153,6 +180,21 @@ func TestRegisterLoopStartStop(t *testing.T) {
 	case <-a.regDone:
 	default:
 		t.Fatal("expected regDone to be closed")
+	}
+}
+
+func TestStopRegisterLoopBeforeStart(t *testing.T) {
+	a := &Agent{regDone: make(chan struct{})}
+	done := make(chan struct{})
+	go func() {
+		a.stopRegisterLoop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stopRegisterLoop blocked before the loop was started")
 	}
 }
 

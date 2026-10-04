@@ -24,6 +24,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -89,6 +90,24 @@ type Config struct {
 	MessageURI  string `json:"message_uri"`
 	EntranceURI string `json:"entrance_uri"`
 
+	// One-shot monitor probe. When MonitorJPEGOut is set, it polls the JPEG
+	// endpoint advertised by the SIP answer while the dialog is confirmed.
+	MonitorProbe        bool     `json:"monitor_probe,omitempty"`
+	MonitorURI          string   `json:"monitor_uri,omitempty"`
+	MonitorHold         Duration `json:"monitor_hold,omitempty"`
+	MonitorRepeat       int      `json:"monitor_repeat,omitempty"`
+	MonitorJPEGOut      string   `json:"monitor_jpeg_out,omitempty"`
+	MonitorJPEGInterval Duration `json:"monitor_jpeg_interval,omitempty"`
+	JPEGQueryS          string   `json:"jpeg_query_s"`
+
+	// Incoming ring JPEG capture. When automatic unlock is enabled at ring
+	// time, a non-empty directory enables a reliable early dialog (183/PRACK)
+	// and saves one timestamped JPEG per call.
+	IncomingJPEGDir      string   `json:"incoming_jpeg_dir,omitempty"`
+	IncomingJPEGHold     Duration `json:"incoming_jpeg_hold,omitempty"`
+	IncomingJPEGInterval Duration `json:"incoming_jpeg_interval,omitempty"`
+	IncomingJPEGMaxFiles int      `json:"incoming_jpeg_max_files,omitempty"`
+
 	// MESSAGE payloads
 	MessageContentType  string `json:"message_content_type"`
 	MessageBody         string `json:"message_body"`
@@ -100,7 +119,7 @@ type Config struct {
 	SendMessages bool `json:"send_messages"`
 
 	// Reject behavior when not answering
-	RejectStatus int    `json:"reject_status"` // 480 or 503
+	RejectStatus int    `json:"reject_status"` // 480, 486, or 503
 	RejectReason string `json:"reject_reason"` // e.g. "Temporarily Unavailable" or "Service Unavailable"
 
 	// HTTP control plane (optional)
@@ -111,6 +130,10 @@ type Config struct {
 
 	// Allowed callers filter (user part only, in your assumption)
 	AllowedCallers []string `json:"allowed_callers"`
+
+	// Callers that may receive the automatic-unlock MESSAGE. This is a
+	// separate allow-list because some allowed callers are camera-only doors.
+	UnlockCallers []string `json:"unlock_callers"`
 
 	// LoadedConfigPath is internal metadata (not part of config.json).
 	LoadedConfigPath string `json:"-"`
@@ -138,6 +161,14 @@ func DefaultConfig() Config {
 		MessageBody:          "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><IFBOX version = \"1.0\"><SYSTEM><SYS_COMMAND><USER_COMM  state = \"request\"  type = \"housing\">ALL</USER_COMM></SYS_COMMAND></SYSTEM></IFBOX>",
 		EntranceContentType:  "application/intercom.message+xml",
 		EntranceBody:         "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\r\n<IFBOX version = \"1.0\">\r\n    <SYSTEM>\r\n        <SYS_COMMAND>\r\n            <USER_COMM  state = \"request\"  type = \"lock\">UNLOCK</USER_COMM>\r\n        </SYS_COMMAND>\r\n    </SYSTEM>\r\n</IFBOX>\r\n",
+		MonitorHold:          Duration{Duration: 3 * time.Second},
+		MonitorRepeat:        2,
+		MonitorJPEGInterval:  Duration{Duration: time.Second},
+		JPEGQueryS:           defaultJPEGQueryS,
+		IncomingJPEGHold:     Duration{Duration: 5 * time.Second},
+		IncomingJPEGInterval: Duration{Duration: time.Second},
+		IncomingJPEGMaxFiles: 100,
+		UnlockCallers:        []string{"interphone0"},
 	}
 }
 
@@ -223,7 +254,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.BoolVar(&cfg.AnswerCalls, "answer-calls", cfg.AnswerCalls, "Answer incoming INVITE calls")
 	fs.BoolVar(&cfg.SendMessages, "send-messages", cfg.SendMessages, "Send SIP MESSAGE (initial/entrance)")
 
-	fs.IntVar(&cfg.RejectStatus, "reject-code", cfg.RejectStatus, "Reject status code when not answering (480 or 503)")
+	fs.IntVar(&cfg.RejectStatus, "reject-code", cfg.RejectStatus, "Reject status code when not answering (480, 486, or 503)")
 	fs.StringVar(&cfg.RejectReason, "reject-reason", cfg.RejectReason, "Reject reason phrase when not answering")
 
 	fs.StringVar(&cfg.HTTPListen, "http", cfg.HTTPListen, "HTTP listen address (empty disables HTTP)")
@@ -233,6 +264,17 @@ func ParseFlags(args []string) (Config, error) {
 	fs.StringVar(&cfg.RegisterURI, "register-uri", cfg.RegisterURI, "REGISTER target SIP URI (required)")
 	fs.StringVar(&cfg.MessageURI, "message-uri", cfg.MessageURI, "MESSAGE target SIP URI (required)")
 	fs.StringVar(&cfg.EntranceURI, "entrance-uri", cfg.EntranceURI, "Entrance target SIP URI (required)")
+	fs.BoolVar(&cfg.MonitorProbe, "monitor-probe", cfg.MonitorProbe, "Run the one-shot SIP monitor probe and exit")
+	fs.StringVar(&cfg.MonitorURI, "monitor-uri", cfg.MonitorURI, "Monitor target SIP URI (required with --monitor-probe)")
+	fs.DurationVar(&cfg.MonitorHold.Duration, "monitor-hold", cfg.MonitorHold.Duration, "How long each probe dialog remains established")
+	fs.IntVar(&cfg.MonitorRepeat, "monitor-repeat", cfg.MonitorRepeat, "Number of sequential monitor dialogs in probe mode")
+	fs.StringVar(&cfg.MonitorJPEGOut, "monitor-jpeg-out", cfg.MonitorJPEGOut, "Absolute path atomically updated with the latest valid monitor JPEG")
+	fs.DurationVar(&cfg.MonitorJPEGInterval.Duration, "monitor-jpeg-interval", cfg.MonitorJPEGInterval.Duration, "Minimum interval between monitor JPEG requests")
+	fs.StringVar(&cfg.JPEGQueryS, "jpeg-query-s", cfg.JPEGQueryS, "Value of the IFBOX JPEG HTTP query parameter s")
+	fs.StringVar(&cfg.IncomingJPEGDir, "incoming-jpeg-dir", cfg.IncomingJPEGDir, "Absolute directory for timestamped JPEGs captured during automatic unlock")
+	fs.DurationVar(&cfg.IncomingJPEGHold.Duration, "incoming-jpeg-hold", cfg.IncomingJPEGHold.Duration, "How long to poll JPEGs for each incoming ring")
+	fs.DurationVar(&cfg.IncomingJPEGInterval.Duration, "incoming-jpeg-interval", cfg.IncomingJPEGInterval.Duration, "Minimum interval between incoming-ring JPEG requests")
+	fs.IntVar(&cfg.IncomingJPEGMaxFiles, "incoming-jpeg-max-files", cfg.IncomingJPEGMaxFiles, "Maximum number of timestamped incoming-ring JPEGs retained")
 
 	fs.StringVar(&cfg.MessageContentType, "msg-ct", cfg.MessageContentType, "Content-Type for MESSAGE to message_uri")
 	fs.StringVar(&cfg.MessageBody, "msg-body", cfg.MessageBody, "Body for MESSAGE to message_uri")
@@ -240,8 +282,9 @@ func ParseFlags(args []string) (Config, error) {
 	fs.StringVar(&cfg.EntranceBody, "entrance-body", cfg.EntranceBody, "Body for MESSAGE to entrance_uri")
 
 	// Allowed callers: empty means allow-all (your policy).
-	// Flags and JSON both append to the same slice; no special reset/merge logic.
+	// Repeated flags append to the values already supplied by defaults or JSON.
 	fs.Var((*StringList)(&cfg.AllowedCallers), "allowed-caller", "Allowed caller users (can be specified multiple times)")
+	fs.Var(&ReplacingStringList{values: &cfg.UnlockCallers}, "unlock-caller", "Caller users eligible for automatic unlock; explicit flags replace the configured default")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr,
@@ -285,8 +328,50 @@ func ParseFlags(args []string) (Config, error) {
 		return cfg, missingRequiredError(missing)
 	}
 
-	if cfg.RejectStatus != 480 && cfg.RejectStatus != 503 {
-		return cfg, fmt.Errorf("reject-code must be 480 or 503")
+	if cfg.RejectStatus != 480 && cfg.RejectStatus != 486 && cfg.RejectStatus != 503 {
+		return cfg, fmt.Errorf("reject-code must be 480, 486, or 503")
+	}
+	if cfg.MonitorProbe && cfg.MonitorURI == "" {
+		return cfg, fmt.Errorf("monitor-uri is required with monitor-probe")
+	}
+	if cfg.MonitorProbe {
+		if cfg.MonitorHold.Duration < 0 {
+			return cfg, fmt.Errorf("monitor-hold must not be negative")
+		}
+		if cfg.MonitorRepeat < 1 {
+			return cfg, fmt.Errorf("monitor-repeat must be at least 1")
+		}
+	}
+	if cfg.MonitorJPEGOut != "" {
+		if !cfg.MonitorProbe {
+			return cfg, fmt.Errorf("monitor-jpeg-out requires monitor-probe")
+		}
+		if !filepath.IsAbs(cfg.MonitorJPEGOut) {
+			return cfg, fmt.Errorf("monitor-jpeg-out must be an absolute path")
+		}
+		if cfg.MonitorHold.Duration <= 0 {
+			return cfg, fmt.Errorf("monitor-hold must be positive with monitor-jpeg-out")
+		}
+		if cfg.MonitorJPEGInterval.Duration <= 0 {
+			return cfg, fmt.Errorf("monitor-jpeg-interval must be positive")
+		}
+	}
+	if strings.TrimSpace(cfg.JPEGQueryS) == "" {
+		return cfg, fmt.Errorf("jpeg-query-s must not be empty")
+	}
+	if cfg.IncomingJPEGDir != "" {
+		if !filepath.IsAbs(cfg.IncomingJPEGDir) {
+			return cfg, fmt.Errorf("incoming-jpeg-dir must be an absolute path")
+		}
+		if cfg.IncomingJPEGHold.Duration <= 0 {
+			return cfg, fmt.Errorf("incoming-jpeg-hold must be positive")
+		}
+		if cfg.IncomingJPEGInterval.Duration <= 0 {
+			return cfg, fmt.Errorf("incoming-jpeg-interval must be positive")
+		}
+		if cfg.IncomingJPEGMaxFiles < 1 {
+			return cfg, fmt.Errorf("incoming-jpeg-max-files must be at least 1")
+		}
 	}
 
 	return cfg, nil
@@ -307,5 +392,35 @@ func (s *StringList) Set(v string) error {
 		return nil
 	}
 	*s = append(*s, v)
+	return nil
+}
+
+// ReplacingStringList makes repeated CLI values replace a JSON/default slice
+// as a group. This matters for the security-sensitive unlock allow-list: an
+// explicit flag must be able to remove the default caller.
+type ReplacingStringList struct {
+	values *[]string
+	set    bool
+}
+
+func (s *ReplacingStringList) String() string {
+	if s == nil || s.values == nil {
+		return ""
+	}
+	return strings.Join(*s.values, ",")
+}
+
+func (s *ReplacingStringList) Set(value string) error {
+	if s.values == nil {
+		return fmt.Errorf("replacement string list has no target")
+	}
+	if !s.set {
+		*s.values = nil
+		s.set = true
+	}
+	value = strings.TrimSpace(value)
+	if value != "" {
+		*s.values = append(*s.values, value)
+	}
 	return nil
 }

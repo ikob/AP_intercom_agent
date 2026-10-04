@@ -246,6 +246,7 @@ func TestRunSendsEntranceMessage(t *testing.T) {
 	cfg.EntranceContentType = "text/plain"
 	cfg.EntranceBody = "entrance"
 	cfg.EntranceURI = "sip:entrance@127.0.0.1:5060"
+	cfg.UnlockCallers = []string{"sipgo"}
 
 	agent, err := NewAgent(cfg, NewMessageBuffer(1))
 	if err != nil {

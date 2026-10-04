@@ -43,6 +43,15 @@ func main() {
 	}
 	defer agent.Close()
 
+	if cfg.MonitorProbe {
+		if err := agent.RunMonitorProbe(ctx); err != nil {
+			slog.Error("monitor probe failed", "error", err)
+			agent.Close()
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Optional HTTP control plane.
 	_ = StartHTTP(ctx, cfg.HTTPListen, agent, &cfg, msgBuf)
 

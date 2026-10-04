@@ -28,6 +28,7 @@ type Agent struct {
 	recipient         sip.Uri
 	messageRecipient  sip.Uri
 	entranceRecipient sip.Uri
+	monitorRecipient  sip.Uri
 
 	ua  *sipgo.UserAgent
 	cli sipClient
@@ -41,6 +42,14 @@ type Agent struct {
 	regMu     sync.Mutex
 	regCancel context.CancelFunc
 	regDone   chan struct{}
+
+	monitorMu          sync.Mutex
+	monitorState       monitorState
+	monitorDialog      *diago.DialogClientSession
+	prackMu            sync.Mutex
+	prackWaiters       map[string]*inboundPRACKWaiter
+	incomingJPEGMu     sync.Mutex
+	incomingJPEGActive map[string]int
 
 	msgBuf         *MessageBuffer
 	regID          uint64
@@ -67,6 +76,12 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 	if err := sip.ParseUri(cfg.EntranceURI, &entranceRecipient); err != nil {
 		return nil, fmt.Errorf("failed to parse entrance uri: %w", err)
 	}
+	monitorRecipient := sip.Uri{}
+	if cfg.MonitorURI != "" {
+		if err := sip.ParseUri(cfg.MonitorURI, &monitorRecipient); err != nil {
+			return nil, fmt.Errorf("failed to parse monitor uri: %w", err)
+		}
+	}
 
 	setupLogger(cfg.LogLevel)
 
@@ -83,22 +98,21 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 	cli, _ := sipgo.NewClient(ua)
 	srv, _ := sipgo.NewServer(ua)
 
-	srv.OnPrack(func(req *sip.Request, tx sip.ServerTransaction) {
-		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
-		_ = tx.Respond(res)
-	})
-
 	a := &Agent{
-		cfg:               cfg,
-		recipient:         recipient,
-		messageRecipient:  messageRecipient,
-		entranceRecipient: entranceRecipient,
-		ua:                ua,
-		cli:               cli,
-		srv:               srv,
-		regDone:           make(chan struct{}),
-		msgBuf:            msgBuf,
+		cfg:                cfg,
+		recipient:          recipient,
+		messageRecipient:   messageRecipient,
+		entranceRecipient:  entranceRecipient,
+		monitorRecipient:   monitorRecipient,
+		ua:                 ua,
+		cli:                cli,
+		srv:                srv,
+		regDone:            make(chan struct{}),
+		prackWaiters:       make(map[string]*inboundPRACKWaiter),
+		incomingJPEGActive: make(map[string]int),
+		msgBuf:             msgBuf,
 	}
+	a.srv.OnPrack(a.handleInboundPRACK)
 	a.answerEnabled.Store(cfg.AnswerCalls)
 	a.messageEnabled.Store(cfg.SendMessages)
 	a.registerLoopFn = a.registerLoop
@@ -167,6 +181,10 @@ func setupLogger(level string) {
 }
 
 func (a *Agent) Close() {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_ = a.StopMonitor(ctx)
+	cancel()
+
 	// Stop register loop if running (best-effort).
 	a.stopRegisterLoop()
 
@@ -186,6 +204,16 @@ func (a *Agent) regOpts() diago.RegisterOptions {
 }
 
 func (a *Agent) Run(ctx context.Context) error {
+	if a.cfg.IncomingJPEGDir != "" {
+		removed, err := a.pruneIncomingJPEGsAtStartup()
+		if err != nil {
+			slog.Warn("Failed to apply incoming JPEG retention at startup", "error", err)
+		}
+		if removed > 0 {
+			slog.Info("Incoming JPEG retention completed", "removed", removed, "remaining_limit", a.cfg.IncomingJPEGMaxFiles)
+		}
+	}
+
 	// Start INVITE handling.
 	go func() {
 		a.tu.Serve(ctx, func(inDialog *diago.DialogServerSession) {
@@ -198,18 +226,55 @@ func (a *Agent) Run(ctx context.Context) error {
 				_ = inDialog.Respond(403, "Forbidden", nil)
 				return
 			}
+			caller := callerFromInvite(inDialog)
 
-			// Send entrance MESSAGE on incoming call regardless of AnswerCalls,
-			// as long as send_messages is enabled.
-			if a.messageEnabled.Load() {
-				if err := a.sendMessage(ctx, a.entranceRecipient, a.cfg.EntranceContentType, []byte(a.cfg.EntranceBody)); err != nil {
-					slog.Error("Failed to send entrance MESSAGE", "error", err)
+			// Snapshot the automatic-unlock state once for this call. The same
+			// mode controls image capture and unlock eligibility, even if Home
+			// Assistant changes the runtime state mid-call.
+			autoUnlockMode := a.messageEnabled.Load()
+			captureIncomingJPEG := a.shouldCaptureIncomingJPEG(autoUnlockMode)
+			unlockCaller := a.unlockCallerAllowed(caller)
+			if autoUnlockMode && !unlockCaller {
+				slog.Info("Automatic unlock skipped for caller", "caller", caller)
+			}
+			if captureIncomingJPEG {
+				_ = inDialog.Trying()
+				slog.Info("Trying", "id", inDialog.ID)
+			}
+
+			var unlockOnce sync.Once
+			sendUnlock := func() {
+				if !autoUnlockMode || !unlockCaller {
+					return
 				}
+				unlockOnce.Do(func() {
+					if err := a.sendMessage(ctx, a.entranceRecipient, a.cfg.EntranceContentType, []byte(a.cfg.EntranceBody)); err != nil {
+						slog.Error("Failed to send entrance MESSAGE", "error", err)
+					}
+				})
+			}
+
+			if captureIncomingJPEG {
+				// Put the reliable 183 on the wire before unlocking, then send the
+				// MESSAGE immediately; JPEG polling does not delay the unlock.
+				if err := a.captureIncomingRing(ctx, inDialog, sendUnlock); err != nil && inDialog.Context().Err() == nil {
+					slog.Error("Failed to capture incoming ring JPEG", "id", inDialog.ID, "error", err)
+				}
+				// Capture setup can fail before the 183 callback. Automatic unlock
+				// must still run in that case.
+				sendUnlock()
+				if inDialog.Context().Err() != nil {
+					return
+				}
+			} else {
+				sendUnlock()
 			}
 
 			// If we do not answer calls, reject INVITE but keep registration alive.
 			if !a.answerEnabled.Load() {
-				_ = inDialog.Trying()
+				if !captureIncomingJPEG {
+					_ = inDialog.Trying()
+				}
 				_ = inDialog.Respond(a.cfg.RejectStatus, a.cfg.RejectReason, nil)
 				return
 			}
@@ -268,23 +333,23 @@ func (a *Agent) callerAllowedFromInvite(inDialog *diago.DialogServerSession) boo
 	if len(a.cfg.AllowedCallers) == 0 {
 		return true // Whitelist is empty, allow all
 	}
+	return slices.Contains(a.cfg.AllowedCallers, callerFromInvite(inDialog))
+}
 
+func callerFromInvite(inDialog *diago.DialogServerSession) string {
+	if inDialog == nil {
+		return ""
+	}
 	req := inDialog.InviteRequest
 	if req == nil {
-		return false
+		return ""
 	}
 
 	from := req.From()
 	if from == nil {
-		return false
+		return ""
 	}
-
-	u := from.Address.User
-	if u == "" {
-		return false
-	}
-
-	return slices.Contains(a.cfg.AllowedCallers, u)
+	return from.Address.User
 }
 
 // SetEnabled toggles a runtime boolean (pointer required).
@@ -294,6 +359,14 @@ func (a *Agent) SetEnabled(target *atomic.Bool, enabled bool) {
 
 func (a *Agent) SetAnswerEnabled(enabled bool)  { a.SetEnabled(&a.answerEnabled, enabled) }
 func (a *Agent) SetMessageEnabled(enabled bool) { a.SetEnabled(&a.messageEnabled, enabled) }
+
+func (a *Agent) shouldCaptureIncomingJPEG(autoUnlock bool) bool {
+	return autoUnlock && a.cfg.IncomingJPEGDir != ""
+}
+
+func (a *Agent) unlockCallerAllowed(caller string) bool {
+	return caller != "" && slices.Contains(a.cfg.UnlockCallers, caller)
+}
 
 func (a *Agent) startRegisterLoop(appCtx context.Context) {
 	a.regMu.Lock()
@@ -342,9 +415,10 @@ func (a *Agent) stopRegisterLoop() {
 	a.regCancel = nil
 	a.regMu.Unlock()
 
-	if cancel != nil {
-		cancel()
+	if cancel == nil {
+		return
 	}
+	cancel()
 	if done != nil {
 		<-done
 	}
