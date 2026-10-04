@@ -11,6 +11,21 @@ For local VS Code debugging, copy `.env.example` to `.env` and set
 variable outside VS Code when `--password` is omitted. An explicit command-line
 flag or JSON configuration value takes precedence.
 
+## Disclaimer
+
+This is an unofficial, experimental project and is not affiliated with or
+endorsed by Aiphone. Use it entirely at your own risk. It can answer or reject
+calls, send door-unlock commands, and store camera images. Misconfiguration,
+software defects, or device and protocol changes may unlock an unintended
+entrance, interrupt intercom service, or expose private images.
+
+Do not rely on this software as a safety or security mechanism. You are solely
+responsible for testing it, securing its deployment, complying with applicable
+laws and agreements, and accepting all consequences of its use. To the maximum
+extent permitted by law, the authors and maintainers provide no warranty and
+accept no liability for any loss, damage, security incident, privacy breach, or
+other outcome arising from its use or inability to operate.
+
 ## SIP monitor probe (experimental)
 
 The probe exercises the outgoing SIP setup and teardown used for video
@@ -38,6 +53,13 @@ port. Requests use `Host: ifbox` and the IFBOX CGI query parameter `s` observed
 in the official application. Configure that value with `jpeg_query_s` or
 `-jpeg-query-s`; its default is the value shown above. The output file is
 replaced only after a complete JPEG has been validated.
+
+### Finding `jpeg_query_s`
+
+The `s` value is not supplied by SIP or SDP. Capture the official intercom
+application's network traffic, find its HTTP request to
+`/cgi-bin/image.cgi?s=<VALUE>`, and copy `<VALUE>` into `jpeg_query_s` or
+`-jpeg-query-s`.
 
 The first one or two frames can be valid black 640x480 warm-up images. The log
 reports each frame's size, dimensions, hash prefix, and whether it differs from
