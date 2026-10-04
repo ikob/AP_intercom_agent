@@ -1,4 +1,35 @@
+# Disclaimer
+
+This is an unofficial, experimental project and is not affiliated with or
+endorsed by AIPHONE. Use it entirely at your own risk. It can answer or reject
+calls, send door-unlock commands, and store camera images. Misconfiguration,
+software defects, or device and protocol changes may unlock an unintended
+entrance, interrupt intercom service, or expose private images.
+
+Do not rely on this software as a safety or security mechanism. You are solely
+responsible for testing it, securing its deployment, complying with applicable
+laws and agreements, and accepting all consequences of its use. To the maximum
+extent permitted by law, the authors and maintainers provide no warranty and
+accept no liability for any loss, damage, security incident, privacy breach, or
+other outcome arising from its use or inability to operate.
+
+---
+
+本プロジェクトは非公式かつ実験的なものであり、AIPHONE との関係、承認、
+または保証はありません。利用はすべて自己責任です。本ソフトウェアは通話への
+応答・拒否、ドアの解錠命令、カメラ画像の保存を行います。設定ミス、ソフトウェアの
+不具合、機器やプロトコルの変更により、意図しない入口の解錠、インターホン機能の
+停止、またはプライベートな画像の漏えいが発生する可能性があります。
+
+本ソフトウェアを安全設備または防犯設備として利用しないでください。利用者は、
+事前の検証、導入環境の保護、適用される法令や契約の遵守、および利用によって生じる
+すべての結果について責任を負います。適用法令で認められる最大限の範囲において、
+作者およびメンテナーは一切の保証を行わず、本ソフトウェアの利用または利用不能から
+生じる損失、損害、セキュリティ事故、プライバシー侵害、その他いかなる結果についても
+責任を負いません。
+
 # How to use it.
+
 Set `AP_INTERCOM_PASSWORD` in the environment, then run the SIP agent as:
 
 ```bash
@@ -10,21 +41,6 @@ For local VS Code debugging, copy `.env.example` to `.env` and set
 `envFile`; `.env` is ignored by Git. The agent also accepts the same environment
 variable outside VS Code when `--password` is omitted. An explicit command-line
 flag or JSON configuration value takes precedence.
-
-## Disclaimer
-
-This is an unofficial, experimental project and is not affiliated with or
-endorsed by Aiphone. Use it entirely at your own risk. It can answer or reject
-calls, send door-unlock commands, and store camera images. Misconfiguration,
-software defects, or device and protocol changes may unlock an unintended
-entrance, interrupt intercom service, or expose private images.
-
-Do not rely on this software as a safety or security mechanism. You are solely
-responsible for testing it, securing its deployment, complying with applicable
-laws and agreements, and accepting all consequences of its use. To the maximum
-extent permitted by law, the authors and maintainers provide no warranty and
-accept no liability for any loss, damage, security incident, privacy breach, or
-other outcome arising from its use or inability to operate.
 
 ## SIP monitor probe (experimental)
 
