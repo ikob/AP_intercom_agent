@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026, Katsushi Kobayashi
 //
 // JSON config + flag parsing.
@@ -28,6 +28,8 @@ import (
 	"strings"
 	"time"
 )
+
+const passwordEnvVar = "AP_INTERCOM_PASSWORD"
 
 // Duration is a JSON-friendly duration.
 // It accepts either a JSON string (e.g. "3600s") or a number (seconds).
@@ -228,6 +230,9 @@ func ParseFlags(args []string) (Config, error) {
 		cfg = loaded
 		cfg.LoadedConfigPath = configPath
 	}
+	if cfg.Password == "" {
+		cfg.Password = os.Getenv(passwordEnvVar)
+	}
 
 	fs := flag.NewFlagSet("entrance-go", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -289,7 +294,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr,
 			"Usage:\n  %s [flags]\n\nRequired (unless set via -config JSON):\n"+
-				"  --username --password --proxy --register-uri --message-uri --entrance-uri\n\nFlags:\n",
+				"  --username --password (or "+passwordEnvVar+") --proxy --register-uri --message-uri --entrance-uri\n\nFlags:\n",
 			os.Args[0],
 		)
 		fs.PrintDefaults()
@@ -310,7 +315,7 @@ func ParseFlags(args []string) (Config, error) {
 		missing = append(missing, "username (--username)")
 	}
 	if cfg.Password == "" {
-		missing = append(missing, "password (--password)")
+		missing = append(missing, "password (--password or "+passwordEnvVar+")")
 	}
 	if cfg.ProxyHost == "" {
 		missing = append(missing, "proxy_host (--proxy)")

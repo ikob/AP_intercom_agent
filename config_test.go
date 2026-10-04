@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026, Katsushi Kobayashi
 
 package main
@@ -112,7 +112,38 @@ func TestParseFlagsNoConfigNeeded(t *testing.T) {
 	}
 }
 
+func TestParseFlagsPasswordFlagOverridesEnvironment(t *testing.T) {
+	t.Setenv(passwordEnvVar, "from-environment")
+	cfg, err := ParseFlags(requiredArgs())
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.Password != "p" {
+		t.Fatalf("password = %q, want command-line value", cfg.Password)
+	}
+}
+
+func TestParseFlagsPasswordFromEnvironment(t *testing.T) {
+	t.Setenv(passwordEnvVar, "from-environment")
+	args := []string{
+		"-username=u",
+		"-proxy=proxy:5060",
+		"-register-uri=sip:r@host",
+		"-message-uri=sip:m@host",
+		"-entrance-uri=sip:e@host",
+	}
+
+	cfg, err := ParseFlags(args)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.Password != "from-environment" {
+		t.Fatalf("password = %q, want value from %s", cfg.Password, passwordEnvVar)
+	}
+}
+
 func TestParseFlagsConfigOverride(t *testing.T) {
+	t.Setenv(passwordEnvVar, "from-environment")
 	dir := t.TempDir()
 	path := dir + "/config.json"
 
@@ -143,6 +174,9 @@ func TestParseFlagsConfigOverride(t *testing.T) {
 	if cfg.Username != "override" {
 		t.Fatalf("expected username override, got %q", cfg.Username)
 	}
+	if cfg.Password != "p" {
+		t.Fatalf("password = %q, want JSON configuration value", cfg.Password)
+	}
 	if cfg.JPEGQueryS != "custom-s" {
 		t.Fatalf("expected JPEG query override, got %q", cfg.JPEGQueryS)
 	}
@@ -155,6 +189,7 @@ func TestParseFlagsConfigOverride(t *testing.T) {
 }
 
 func TestParseFlagsMissingRequired(t *testing.T) {
+	t.Setenv(passwordEnvVar, "")
 	_, err := ParseFlags([]string{})
 	if err == nil || !strings.Contains(err.Error(), "missing required") {
 		t.Fatalf("expected missing required error, got %v", err)

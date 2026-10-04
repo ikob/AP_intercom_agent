@@ -1,22 +1,24 @@
 {
+    "version": "0.2.0",
     "configurations": [
-
         {
             "name": "Launch Program",
             "type": "go",
             "request": "launch",
             "mode": "auto",
             "program": "${workspaceFolder}/",
+            "envFile": "${workspaceFolder}/.env",
             "env": {},
             "args": [
-                "-username", "cellphone0", 
-                "-password", "<YOUR_PASSWORD>", 
-                "-allowed-caller", "interphone0", 
-                "-register-uri","SIP server address e.g. sip:", 
-                "-message-uri", "Message recipient e.g. sip:", 
-                "-entrance-uri", "Entrance recipient e.g. sip:",
+                "-username", "cellphone0",
+                "-allowed-caller", "interphone0",
+                "-register-uri", "sip:cellphone0@192.168.100.25:5060",
+                "-message-uri", "sip:housing@192.168.100.25:5060",
+                "-entrance-uri", "sip:housing@192.168.100.25:5060",
                 "-answer-calls=false",
                 "-send-messages=true"
-            ]
-        }]
+            ],
+            "dlvFlags": ["--check-go-version=false"]
+        }
+    ]
 }

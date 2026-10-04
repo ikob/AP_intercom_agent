@@ -1,8 +1,15 @@
 # How to use it.
-Run SIP agents as:
+Set `AP_INTERCOM_PASSWORD` in the environment, then run the SIP agent as:
+
 ```bash
-go run . --username cellphone0 --password <YOUR PASSWORD> -allowed-caller interphone0 -register-uri sip:cellphone0@<IP address>:5060 -message-uri sip:housing@<IP address>:5060 -entrance-uri sip:housing@<IP address>:5060 -answer-calls=false -send-messages=true
+go run . --username cellphone0 -allowed-caller interphone0 -register-uri sip:cellphone0@<IP address>:5060 -message-uri sip:housing@<IP address>:5060 -entrance-uri sip:housing@<IP address>:5060 -answer-calls=true -send-messages=true
 ```
+
+For local VS Code debugging, copy `.env.example` to `.env` and set
+`AP_INTERCOM_PASSWORD`. The tracked `.vscode/launch.json` loads that file via
+`envFile`; `.env` is ignored by Git. The agent also accepts the same environment
+variable outside VS Code when `--password` is omitted. An explicit command-line
+flag or JSON configuration value takes precedence.
 
 ## SIP monitor probe (experimental)
 
@@ -40,14 +47,15 @@ For repeated probes, the next iteration starts only after the preceding BYE
 receives `200 OK`; the same output path is updated with the latest frame. A
 successful run ends with `Monitor probe completed ... result=pass` and exits.
 
-## JPEG capture during automatic unlock
+## JPEG capture for incoming rings
 
 The registered agent can save an entrance image for every allowed incoming
-ring while automatic-unlock mode is enabled, without answering the call:
+ring while `send_messages` is enabled. Whether the call is answered afterward
+is controlled independently:
 
 ```bash
 go run . -config /path/to/config.json \
-  -answer-calls=false \
+  -answer-calls=true \
   -send-messages=true \
   -incoming-jpeg-dir /tmp/aiphone-rings \
   -incoming-jpeg-hold 5s \
@@ -63,14 +71,18 @@ arrives and `incoming_jpeg_dir` is configured. The same state snapshot gates
 the unlock MESSAGE, while `unlock_callers` is a second, caller-specific safety
 allow-list. A Home Assistant state change during the call therefore cannot
 split the decisions. `answer_calls` remains independent and should normally
-stay false for automatic unlock.
+stay true in the tested installation to avoid a Busy/congestion indication.
+After JPEG capture, the agent answers, waits approximately one second, and
+sends BYE. If `answer_calls` is false, it sends the configured final rejection
+instead, and the caller may display Busy or congestion.
 
 For each qualifying call, the agent sends a reliable `183 Session Progress`
 with the audio and HTTP/JPEG SDP, then immediately sends the unlock MESSAGE only
 if the caller is in `unlock_callers`. It accepts the IFBOX-specific PRACK and
 begins HTTP polling after replying `200 OK` to PRACK. Polling stops before the
-final non-2xx response, so no INVITE answer or BYE is required. If capture setup
-fails before `183`, an eligible caller is still unlocked.
+final response. It then either answers and sends BYE (`answer_calls=true`) or
+sends the configured rejection (`answer_calls=false`). If capture setup fails
+before `183`, an eligible caller is still unlocked.
 
 One timestamped file is retained per ring, for example
 `20261004T214123.123456789+0900_interphone0.jpg`. Frames received during that
@@ -94,3 +106,10 @@ directory. The add-on maps `/media` read-write, and Home Assistant can browse
 the retained images under Media > My media. Consider excluding Media from
 automatic backups if these transient entrance images should not enlarge backup
 archives.
+
+## License
+
+The current source is licensed under the
+[Apache License 2.0](./LICENSE). Earlier published revisions remain available
+under the MIT terms that accompanied them. Third-party dependencies retain
+their respective licenses.

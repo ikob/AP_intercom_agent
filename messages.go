@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026, Katsushi Kobayashi
 //
 // This file keeps your inbound MESSAGE structure and adds a small in-memory ring buffer
