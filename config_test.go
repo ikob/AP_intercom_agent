@@ -37,6 +37,13 @@ func TestDurationJSON(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigUsesSafeRuntimeControls(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.AnswerCalls || cfg.SendMessages || !cfg.CaptureImages {
+		t.Fatalf("defaults answer=%v send=%v capture=%v, want false/false/true", cfg.AnswerCalls, cfg.SendMessages, cfg.CaptureImages)
+	}
+}
+
 func TestLoadConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/config.json"
@@ -69,8 +76,70 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.IncomingJPEGMaxFiles != 100 {
 		t.Fatalf("incoming JPEG max files = %d, want 100", cfg.IncomingJPEGMaxFiles)
 	}
+	if !cfg.CaptureImages {
+		t.Fatal("capture_images should use the safe image-agent default when both toggles are omitted")
+	}
+	if cfg.SendMessages || cfg.AnswerCalls {
+		t.Fatalf("safe defaults answer_calls=%v send_messages=%v, want false/false", cfg.AnswerCalls, cfg.SendMessages)
+	}
 	if len(cfg.UnlockCallers) != 1 || cfg.UnlockCallers[0] != "interphone0" {
 		t.Fatalf("unlock callers = %v, want [interphone0]", cfg.UnlockCallers)
+	}
+}
+
+func TestLoadConfigFileCaptureImagesCompatibility(t *testing.T) {
+	tests := []struct {
+		name             string
+		body             string
+		wantCapture      bool
+		wantExplicitFlag bool
+	}{
+		{
+			name:             "new config uses independent capture default",
+			body:             `{}`,
+			wantCapture:      true,
+			wantExplicitFlag: true,
+		},
+		{
+			name:             "legacy config follows disabled messages",
+			body:             `{"send_messages": false}`,
+			wantCapture:      false,
+			wantExplicitFlag: false,
+		},
+		{
+			name:             "legacy config follows enabled messages",
+			body:             `{"send_messages": true}`,
+			wantCapture:      true,
+			wantExplicitFlag: false,
+		},
+		{
+			name:             "explicit capture is independent",
+			body:             `{"send_messages": false, "capture_images": true}`,
+			wantCapture:      true,
+			wantExplicitFlag: true,
+		},
+		{
+			name:             "explicit disabled capture is independent",
+			body:             `{"send_messages": true, "capture_images": false}`,
+			wantCapture:      false,
+			wantExplicitFlag: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(test.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfigFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CaptureImages != test.wantCapture || cfg.captureImagesSet != test.wantExplicitFlag {
+				t.Fatalf("capture_images=%v explicit=%v, want %v/%v", cfg.CaptureImages, cfg.captureImagesSet, test.wantCapture, test.wantExplicitFlag)
+			}
+		})
 	}
 }
 
@@ -109,6 +178,69 @@ func TestParseFlagsNoConfigNeeded(t *testing.T) {
 	}
 	if cfg.LoadedConfigPath != "" {
 		t.Fatalf("expected empty LoadedConfigPath, got %q", cfg.LoadedConfigPath)
+	}
+	if cfg.AnswerCalls || cfg.SendMessages || !cfg.CaptureImages {
+		t.Fatalf("safe defaults answer=%v send=%v capture=%v, want false/false/true", cfg.AnswerCalls, cfg.SendMessages, cfg.CaptureImages)
+	}
+}
+
+func TestParseFlagsCaptureImagesCompatibility(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantCapture bool
+	}{
+		{
+			name:        "automatic unlock flag does not disable default capture",
+			args:        []string{"-send-messages=false"},
+			wantCapture: true,
+		},
+		{
+			name:        "explicit capture overrides disabled messages",
+			args:        []string{"-send-messages=false", "-capture-images=true"},
+			wantCapture: true,
+		},
+		{
+			name:        "explicit capture overrides enabled messages",
+			args:        []string{"-send-messages=true", "-capture-images=false"},
+			wantCapture: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, err := ParseFlags(append(requiredArgs(), test.args...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CaptureImages != test.wantCapture {
+				t.Fatalf("capture_images=%v, want %v", cfg.CaptureImages, test.wantCapture)
+			}
+		})
+	}
+}
+
+func TestParseFlagsPreservesExplicitConfigCaptureImages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{
+  "username": "u",
+  "password": "p",
+  "proxy_host": "proxy:5060",
+  "register_uri": "sip:r@host",
+  "message_uri": "sip:m@host",
+  "entrance_uri": "sip:e@host",
+  "send_messages": false,
+  "capture_images": false
+}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ParseFlags([]string{"-config=" + path, "-send-messages=true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SendMessages || cfg.CaptureImages {
+		t.Fatalf("send_messages=%v capture_images=%v, want true/false", cfg.SendMessages, cfg.CaptureImages)
 	}
 }
 

@@ -45,8 +45,9 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 			"config_path": cfg.LoadedConfigPath,
 			"config":      cfg,
 			"runtime": map[string]any{
-				"answer_calls":  agent.answerEnabled.Load(),
-				"send_messages": agent.messageEnabled.Load(),
+				"answer_calls":   agent.answerEnabled.Load(),
+				"send_messages":  agent.messageEnabled.Load(),
+				"capture_images": agent.captureEnabled.Load(),
 			},
 		}
 
@@ -63,8 +64,9 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"answer_calls":  agent.answerEnabled.Load(),
-				"send_messages": agent.messageEnabled.Load(),
+				"answer_calls":   agent.answerEnabled.Load(),
+				"send_messages":  agent.messageEnabled.Load(),
+				"capture_images": agent.captureEnabled.Load(),
 			})
 			return
 
@@ -74,8 +76,9 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 
 			// pointer bool
 			var req struct {
-				AnswerCalls  *bool `json:"answer_calls"`
-				SendMessages *bool `json:"send_messages"`
+				AnswerCalls   *bool `json:"answer_calls"`
+				SendMessages  *bool `json:"send_messages"`
+				CaptureImages *bool `json:"capture_images"`
 			}
 			if err := json.Unmarshal(body, &req); err != nil {
 				http.Error(w, "invalid json", http.StatusBadRequest)
@@ -84,6 +87,7 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 
 			prevAnswer := agent.answerEnabled.Load()
 			prevMessages := agent.messageEnabled.Load()
+			prevCapture := agent.captureEnabled.Load()
 			changed := false
 
 			if req.AnswerCalls != nil {
@@ -94,20 +98,27 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 				agent.SetMessageEnabled(*req.SendMessages)
 				changed = true
 			}
+			if req.CaptureImages != nil {
+				agent.SetCaptureEnabled(*req.CaptureImages)
+				changed = true
+			}
 
 			if changed {
 				slog.Info("HTTP state updated",
 					"prev_answer_calls", prevAnswer,
 					"prev_send_messages", prevMessages,
+					"prev_capture_images", prevCapture,
 					"answer_calls", agent.answerEnabled.Load(),
 					"send_messages", agent.messageEnabled.Load(),
+					"capture_images", agent.captureEnabled.Load(),
 				)
 			}
 
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"answer_calls":  agent.answerEnabled.Load(),
-				"send_messages": agent.messageEnabled.Load(),
+				"answer_calls":   agent.answerEnabled.Load(),
+				"send_messages":  agent.messageEnabled.Load(),
+				"capture_images": agent.captureEnabled.Load(),
 			})
 			return
 

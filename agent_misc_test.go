@@ -41,30 +41,53 @@ func TestSetEnabled(t *testing.T) {
 	}
 }
 
-func TestSetAnswerAndMessageEnabled(t *testing.T) {
+func TestSetRuntimeControls(t *testing.T) {
 	a := &Agent{}
 	a.answerEnabled.Store(false)
 	a.messageEnabled.Store(false)
+	a.captureEnabled.Store(false)
 
 	a.SetAnswerEnabled(true)
 	a.SetMessageEnabled(true)
+	a.SetCaptureEnabled(true)
 
-	if !a.answerEnabled.Load() || !a.messageEnabled.Load() {
-		t.Fatalf("expected both flags true: answer=%v message=%v", a.answerEnabled.Load(), a.messageEnabled.Load())
+	if !a.answerEnabled.Load() || !a.messageEnabled.Load() || !a.captureEnabled.Load() {
+		t.Fatalf("expected all flags true: answer=%v message=%v capture=%v", a.answerEnabled.Load(), a.messageEnabled.Load(), a.captureEnabled.Load())
 	}
 }
 
-func TestIncomingJPEGCaptureRequiresAutomaticUnlock(t *testing.T) {
+func TestIncomingJPEGCaptureIsIndependentOfAutomaticUnlock(t *testing.T) {
 	a := &Agent{cfg: Config{IncomingJPEGDir: "/tmp/aiphone-rings"}}
 	if a.shouldCaptureIncomingJPEG(false) {
-		t.Fatal("capture must be disabled while automatic unlock is off")
+		t.Fatal("capture must be disabled when capture_images is off")
 	}
 	if !a.shouldCaptureIncomingJPEG(true) {
-		t.Fatal("capture must be enabled while automatic unlock is on")
+		t.Fatal("capture must be enabled when capture_images is on")
+	}
+	a.messageEnabled.Store(false)
+	a.captureEnabled.Store(true)
+	if !a.shouldCaptureIncomingJPEG(a.captureEnabled.Load()) {
+		t.Fatal("capture must remain enabled while automatic unlock is off")
 	}
 	a.cfg.IncomingJPEGDir = ""
 	if a.shouldCaptureIncomingJPEG(true) {
 		t.Fatal("capture must be disabled without an output directory")
+	}
+}
+
+func TestRunIfContextsActive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	if runIfContextsActive(func() { called = true }, context.Background(), ctx) {
+		t.Fatal("canceled context must not run the action")
+	}
+	if called {
+		t.Fatal("action ran after cancellation")
+	}
+
+	if !runIfContextsActive(func() { called = true }, context.Background(), context.Background()) || !called {
+		t.Fatal("active contexts should run the action")
 	}
 }
 

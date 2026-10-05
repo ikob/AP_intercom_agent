@@ -33,6 +33,7 @@ func startHTTPTestServer(t *testing.T) (string, context.CancelFunc, *Agent, *Con
 	agent := &Agent{}
 	agent.answerEnabled.Store(true)
 	agent.messageEnabled.Store(false)
+	agent.captureEnabled.Store(true)
 
 	cfg := DefaultConfig()
 	cfg.LoadedConfigPath = "/tmp/config.json"
@@ -103,6 +104,14 @@ func TestHTTPHealthzAndConfig(t *testing.T) {
 	if payload["config_path"] != cfg.LoadedConfigPath {
 		t.Fatalf("unexpected config_path: %v", payload["config_path"])
 	}
+	runtime, ok := payload["runtime"].(map[string]any)
+	if !ok || runtime["capture_images"] != true {
+		t.Fatalf("runtime does not expose capture_images: %#v", payload["runtime"])
+	}
+	config, ok := payload["config"].(map[string]any)
+	if !ok || config["capture_images"] != true {
+		t.Fatalf("config does not expose capture_images: %#v", payload["config"])
+	}
 }
 
 func TestHTTPStateAndMessages(t *testing.T) {
@@ -121,7 +130,7 @@ func TestHTTPStateAndMessages(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&state); err != nil {
 		t.Fatalf("decode state: %v", err)
 	}
-	if state["answer_calls"] != true || state["send_messages"] != false {
+	if state["answer_calls"] != true || state["send_messages"] != false || state["capture_images"] != true {
 		t.Fatalf("unexpected state: %#v", state)
 	}
 
@@ -134,8 +143,21 @@ func TestHTTPStateAndMessages(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("state post status: %d", res.StatusCode)
 	}
-	if agent.answerEnabled.Load() || !agent.messageEnabled.Load() {
-		t.Fatalf("agent flags not updated: answer=%v send=%v", agent.answerEnabled.Load(), agent.messageEnabled.Load())
+	if agent.answerEnabled.Load() || !agent.messageEnabled.Load() || !agent.captureEnabled.Load() {
+		t.Fatalf("agent flags not updated or unspecified capture changed: answer=%v send=%v capture=%v", agent.answerEnabled.Load(), agent.messageEnabled.Load(), agent.captureEnabled.Load())
+	}
+
+	body = []byte(`{"capture_images": false}`)
+	res, err = client.Post(baseURL+"/v1/state", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("capture state post: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("capture state post status: %d", res.StatusCode)
+	}
+	if agent.answerEnabled.Load() || !agent.messageEnabled.Load() || agent.captureEnabled.Load() {
+		t.Fatalf("partial capture update changed another flag: answer=%v send=%v capture=%v", agent.answerEnabled.Load(), agent.messageEnabled.Load(), agent.captureEnabled.Load())
 	}
 
 	res, err = client.Get(baseURL + "/v1/messages")

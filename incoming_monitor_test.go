@@ -129,7 +129,7 @@ func TestIncomingJPEGFilename(t *testing.T) {
 	}
 }
 
-func TestIncomingJPEGThreeRings(t *testing.T) {
+func TestIncomingJPEGCaptureAndAutomaticUnlockModes(t *testing.T) {
 	agentPort := freeUDPPort(t)
 	jpegData := testJPEG(t, color.RGBA{R: 30, G: 90, B: 150, A: 255})
 	var jpegRequests atomic.Int32
@@ -161,8 +161,10 @@ func TestIncomingJPEGThreeRings(t *testing.T) {
 	cfg.MessageURI = "sip:housing@127.0.0.1:9"
 	cfg.EntranceURI = "sip:housing@127.0.0.1:9"
 	cfg.AnswerCalls = false
-	cfg.SendMessages = true
-	cfg.AllowedCallers = nil
+	cfg.SendMessages = false
+	cfg.CaptureImages = false
+	cfg.AllowedCallers = []string{"interphone0", "interphone1"}
+	cfg.UnlockCallers = []string{"interphone0"}
 	cfg.RejectStatus = 486
 	cfg.RejectReason = "Busy Here"
 	cfg.IncomingJPEGDir = outputDirectory
@@ -193,113 +195,183 @@ func TestIncomingJPEGThreeRings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedFiles := make(map[string]int)
-	for index, caller := range []string{"interphone0", "interphone0", "interphone1"} {
-		dialogUA := &sipgo.DialogUA{
-			Client: client,
-			ContactHDR: sip.ContactHeader{Address: sip.Uri{
-				Scheme: "sip",
-				User:   caller,
-				Host:   host,
-				Port:   port,
-			}},
-		}
-		offer := []byte(fmt.Sprintf(
-			"v=0\r\n"+
-				"o=%s %d %d IN IP4 127.0.0.1\r\n"+
-				"s=session\r\n"+
-				"c=IN IP4 127.0.0.1\r\n"+
-				"t=0 0\r\n"+
-				"m=audio 21000 RTP/AVP 0\r\n"+
-				"a=rtpmap:0 PCMU/8000\r\n"+
-				"a=sendrecv\r\n"+
-				"m=video %d HTTP jpeg\r\n"+
-				"a=sendrecv\r\n",
-			caller, index+1, index+2, jpegPort,
-		))
-		dialog, err := dialogUA.Invite(context.Background(),
-			sip.Uri{Scheme: "sip", User: "cellphone0", Host: "127.0.0.1", Port: agentPort},
-			offer,
-			sip.NewHeader("From", fmt.Sprintf("\"%s\" <sip:%s@127.0.0.1>;tag=invite-%d", caller, caller, index)),
-			sip.NewHeader("Content-Type", "application/sdp"),
-			sip.NewHeader("Supported", "100rel"),
-		)
-		if err != nil {
-			t.Fatalf("%s INVITE: %v", caller, err)
-		}
+	tests := []struct {
+		name          string
+		caller        string
+		captureImages bool
+		autoUnlock    bool
+		wantJPEG      bool
+		wantUnlock    bool
+	}{
+		{
+			name:          "capture only",
+			caller:        "interphone0",
+			captureImages: true,
+			wantJPEG:      true,
+		},
+		{
+			name:          "capture and unlock",
+			caller:        "interphone0",
+			captureImages: true,
+			autoUnlock:    true,
+			wantJPEG:      true,
+			wantUnlock:    true,
+		},
+		{
+			name:          "capture without unlock for excluded caller",
+			caller:        "interphone1",
+			captureImages: true,
+			autoUnlock:    true,
+			wantJPEG:      true,
+		},
+		{
+			name:       "unlock only with JPEG directory configured",
+			caller:     "interphone0",
+			autoUnlock: true,
+			wantUnlock: true,
+		},
+		{
+			name:       "no capture or unlock for excluded caller",
+			caller:     "interphone1",
+			autoUnlock: true,
+		},
+	}
 
-		got183 := false
-		pracked := false
-		answerCtx, cancelAnswer := context.WithTimeout(context.Background(), 5*time.Second)
-		err = dialog.WaitAnswer(answerCtx, sipgo.AnswerOptions{OnResponse: func(response *sip.Response) error {
-			if response.StatusCode != 183 {
-				return nil
-			}
-			got183 = true
-			if header := response.GetHeader("Require"); header == nil || !headerHasToken(header.Value(), "100rel") {
-				return fmt.Errorf("183 has no Require: 100rel")
-			}
-			if header := response.GetHeader("RSeq"); header == nil || header.Value() != "1000" {
-				return fmt.Errorf("183 has unexpected RSeq: %v", header)
-			}
-			if !strings.Contains(string(response.Body()), "m=video 8080 HTTP jpeg\r\na=recvonly\r\n") {
-				return fmt.Errorf("183 has unexpected SDP: %q", response.Body())
-			}
-			if pracked {
-				return nil
-			}
-			pracked = true
-			contact := response.Contact()
-			if contact == nil {
-				return fmt.Errorf("183 has no Contact")
-			}
-			prack := sip.NewRequest(sip.PRACK, contact.Address)
-			prack.AppendHeader(sip.NewHeader("From", fmt.Sprintf("<sip:%s@127.0.0.1>;tag=changed-%d", caller, index)))
-			prack.AppendHeader(sip.NewHeader("RAck", "(null)2 INVITE"))
-			prackCtx, cancelPRACK := context.WithTimeout(context.Background(), time.Second)
-			prackResponse, err := dialog.Do(prackCtx, prack)
-			cancelPRACK()
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			agent.SetCaptureEnabled(test.captureImages)
+			agent.SetMessageEnabled(test.autoUnlock)
+			jpegRequestsBefore := jpegRequests.Load()
+			unlockCallsBefore := messageClient.unlockCalls.Load()
+			outputsBefore, err := filepath.Glob(filepath.Join(outputDirectory, "*_"+test.caller+".jpg"))
 			if err != nil {
-				return fmt.Errorf("PRACK: %w", err)
+				t.Fatalf("output glob before INVITE: %v", err)
 			}
-			if prackResponse.StatusCode != 200 {
-				return fmt.Errorf("PRACK status = %d", prackResponse.StatusCode)
-			}
-			return nil
-		}})
-		cancelAnswer()
-		if err == nil {
-			t.Fatalf("%s expected final rejection", caller)
-		}
-		responseErr, ok := err.(*sipgo.ErrDialogResponse)
-		if !ok || responseErr.Res.StatusCode != 486 {
-			t.Fatalf("%s final response = %T %v", caller, err, err)
-		}
-		if !got183 || !pracked {
-			t.Fatalf("%s missing early dialog: 183=%v PRACK=%v", caller, got183, pracked)
-		}
-		expectedFiles[caller]++
-		outputs, err := filepath.Glob(filepath.Join(outputDirectory, "*_"+caller+".jpg"))
-		if err != nil {
-			t.Fatalf("%s output glob: %v", caller, err)
-		}
-		if len(outputs) != expectedFiles[caller] {
-			t.Fatalf("%s outputs = %v, want %d timestamped files", caller, outputs, expectedFiles[caller])
-		}
-		data, err := os.ReadFile(outputs[len(outputs)-1])
-		if err != nil {
-			t.Fatalf("%s output: %v", caller, err)
-		}
-		if len(data) == 0 {
-			t.Fatalf("%s output is empty", caller)
-		}
-	}
 
-	if got := jpegRequests.Load(); got < 3 {
-		t.Fatalf("expected JPEG requests for all callers, got %d", got)
-	}
-	if got := messageClient.unlockCalls.Load(); got != 2 {
-		t.Fatalf("unlock MESSAGE count = %d, want 2 for the two interphone0 rings only", got)
+			dialogUA := &sipgo.DialogUA{
+				Client: client,
+				ContactHDR: sip.ContactHeader{Address: sip.Uri{
+					Scheme: "sip",
+					User:   test.caller,
+					Host:   host,
+					Port:   port,
+				}},
+			}
+			offer := []byte(fmt.Sprintf(
+				"v=0\r\n"+
+					"o=%s %d %d IN IP4 127.0.0.1\r\n"+
+					"s=session\r\n"+
+					"c=IN IP4 127.0.0.1\r\n"+
+					"t=0 0\r\n"+
+					"m=audio 21000 RTP/AVP 0\r\n"+
+					"a=rtpmap:0 PCMU/8000\r\n"+
+					"a=sendrecv\r\n"+
+					"m=video %d HTTP jpeg\r\n"+
+					"a=sendrecv\r\n",
+				test.caller, index+1, index+2, jpegPort,
+			))
+			dialog, err := dialogUA.Invite(context.Background(),
+				sip.Uri{Scheme: "sip", User: "cellphone0", Host: "127.0.0.1", Port: agentPort},
+				offer,
+				sip.NewHeader("From", fmt.Sprintf("\"%s\" <sip:%s@127.0.0.1>;tag=invite-%d", test.caller, test.caller, index)),
+				sip.NewHeader("Content-Type", "application/sdp"),
+				sip.NewHeader("Supported", "100rel"),
+			)
+			if err != nil {
+				t.Fatalf("INVITE: %v", err)
+			}
+
+			got183 := false
+			pracked := false
+			answerCtx, cancelAnswer := context.WithTimeout(context.Background(), 5*time.Second)
+			err = dialog.WaitAnswer(answerCtx, sipgo.AnswerOptions{OnResponse: func(response *sip.Response) error {
+				if response.StatusCode != 183 {
+					return nil
+				}
+				got183 = true
+				if header := response.GetHeader("Require"); header == nil || !headerHasToken(header.Value(), "100rel") {
+					return fmt.Errorf("183 has no Require: 100rel")
+				}
+				if header := response.GetHeader("RSeq"); header == nil || header.Value() != "1000" {
+					return fmt.Errorf("183 has unexpected RSeq: %v", header)
+				}
+				if !strings.Contains(string(response.Body()), "m=video 8080 HTTP jpeg\r\na=recvonly\r\n") {
+					return fmt.Errorf("183 has unexpected SDP: %q", response.Body())
+				}
+				if pracked {
+					return nil
+				}
+				pracked = true
+				contact := response.Contact()
+				if contact == nil {
+					return fmt.Errorf("183 has no Contact")
+				}
+				prack := sip.NewRequest(sip.PRACK, contact.Address)
+				prack.AppendHeader(sip.NewHeader("From", fmt.Sprintf("<sip:%s@127.0.0.1>;tag=changed-%d", test.caller, index)))
+				prack.AppendHeader(sip.NewHeader("RAck", "(null)2 INVITE"))
+				prackCtx, cancelPRACK := context.WithTimeout(context.Background(), time.Second)
+				prackResponse, err := dialog.Do(prackCtx, prack)
+				cancelPRACK()
+				if err != nil {
+					return fmt.Errorf("PRACK: %w", err)
+				}
+				if prackResponse.StatusCode != 200 {
+					return fmt.Errorf("PRACK status = %d", prackResponse.StatusCode)
+				}
+				return nil
+			}})
+			cancelAnswer()
+			if err == nil {
+				t.Fatal("expected final rejection")
+			}
+			responseErr, ok := err.(*sipgo.ErrDialogResponse)
+			if !ok || responseErr.Res.StatusCode != 486 {
+				t.Fatalf("final response = %T %v", err, err)
+			}
+			if test.wantJPEG && (!got183 || !pracked) {
+				t.Fatalf("missing early dialog: 183=%v PRACK=%v", got183, pracked)
+			}
+			if !test.wantJPEG && (got183 || pracked) {
+				t.Fatalf("unexpected early dialog without capture: 183=%v PRACK=%v", got183, pracked)
+			}
+
+			outputs, err := filepath.Glob(filepath.Join(outputDirectory, "*_"+test.caller+".jpg"))
+			if err != nil {
+				t.Fatalf("output glob after INVITE: %v", err)
+			}
+			wantFileCount := len(outputsBefore)
+			if test.wantJPEG {
+				wantFileCount++
+			}
+			if len(outputs) != wantFileCount {
+				t.Fatalf("outputs = %v, want %d timestamped files", outputs, wantFileCount)
+			}
+			if test.wantJPEG {
+				data, err := os.ReadFile(outputs[len(outputs)-1])
+				if err != nil {
+					t.Fatalf("output: %v", err)
+				}
+				if len(data) == 0 {
+					t.Fatal("output is empty")
+				}
+			}
+
+			jpegRequestDelta := jpegRequests.Load() - jpegRequestsBefore
+			if test.wantJPEG && jpegRequestDelta < 1 {
+				t.Fatalf("JPEG request count changed by %d, want at least 1", jpegRequestDelta)
+			}
+			if !test.wantJPEG && jpegRequestDelta != 0 {
+				t.Fatalf("JPEG request count changed by %d, want 0", jpegRequestDelta)
+			}
+			unlockCallDelta := messageClient.unlockCalls.Load() - unlockCallsBefore
+			wantUnlockCalls := int32(0)
+			if test.wantUnlock {
+				wantUnlockCalls = 1
+			}
+			if unlockCallDelta != wantUnlockCalls {
+				t.Fatalf("unlock MESSAGE count changed by %d, want %d", unlockCallDelta, wantUnlockCalls)
+			}
+		})
 	}
 }
 

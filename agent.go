@@ -37,6 +37,7 @@ type Agent struct {
 
 	answerEnabled  atomic.Bool // controls Answer vs Reject
 	messageEnabled atomic.Bool // controls MESSAGE sending
+	captureEnabled atomic.Bool // controls incoming-ring JPEG capture
 
 	// Registration loop cancellation so we can stop it before Unregister().
 	regMu     sync.Mutex
@@ -115,6 +116,7 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 	a.srv.OnPrack(a.handleInboundPRACK)
 	a.answerEnabled.Store(cfg.AnswerCalls)
 	a.messageEnabled.Store(cfg.SendMessages)
+	a.captureEnabled.Store(cfg.CaptureImages)
 	a.registerLoopFn = a.registerLoop
 	a.sleepFn = sleepOrDone
 
@@ -228,11 +230,11 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 			caller := callerFromInvite(inDialog)
 
-			// Snapshot the automatic-unlock state once for this call. The same
-			// mode controls image capture and unlock eligibility, even if Home
-			// Assistant changes the runtime state mid-call.
+			// Snapshot image capture and automatic unlock independently once for
+			// this call. Runtime changes affect only later calls.
 			autoUnlockMode := a.messageEnabled.Load()
-			captureIncomingJPEG := a.shouldCaptureIncomingJPEG(autoUnlockMode)
+			captureImagesMode := a.captureEnabled.Load()
+			captureIncomingJPEG := a.shouldCaptureIncomingJPEG(captureImagesMode)
 			unlockCaller := a.unlockCallerAllowed(caller)
 			if autoUnlockMode && !unlockCaller {
 				slog.Info("Automatic unlock skipped for caller", "caller", caller)
@@ -248,26 +250,29 @@ func (a *Agent) Run(ctx context.Context) error {
 					return
 				}
 				unlockOnce.Do(func() {
-					if err := a.sendMessage(ctx, a.entranceRecipient, a.cfg.EntranceContentType, []byte(a.cfg.EntranceBody)); err != nil {
+					if err := a.sendMessage(inDialog.Context(), a.entranceRecipient, a.cfg.EntranceContentType, []byte(a.cfg.EntranceBody)); err != nil {
 						slog.Error("Failed to send entrance MESSAGE", "error", err)
 					}
 				})
+			}
+			sendUnlockIfActive := func() {
+				runIfContextsActive(sendUnlock, ctx, inDialog.Context())
 			}
 
 			if captureIncomingJPEG {
 				// Put the reliable 183 on the wire before unlocking, then send the
 				// MESSAGE immediately; JPEG polling does not delay the unlock.
-				if err := a.captureIncomingRing(ctx, inDialog, sendUnlock); err != nil && inDialog.Context().Err() == nil {
+				if err := a.captureIncomingRing(ctx, inDialog, sendUnlockIfActive); err != nil && inDialog.Context().Err() == nil {
 					slog.Error("Failed to capture incoming ring JPEG", "id", inDialog.ID, "error", err)
 				}
-				// Capture setup can fail before the 183 callback. Automatic unlock
-				// must still run in that case.
-				sendUnlock()
 				if inDialog.Context().Err() != nil {
 					return
 				}
+				// Capture setup can fail before the 183 callback. Automatic unlock
+				// must still run in that case, but never after dialog cancellation.
+				sendUnlockIfActive()
 			} else {
-				sendUnlock()
+				sendUnlockIfActive()
 			}
 
 			// If we do not answer calls, reject INVITE but keep registration alive.
@@ -359,9 +364,20 @@ func (a *Agent) SetEnabled(target *atomic.Bool, enabled bool) {
 
 func (a *Agent) SetAnswerEnabled(enabled bool)  { a.SetEnabled(&a.answerEnabled, enabled) }
 func (a *Agent) SetMessageEnabled(enabled bool) { a.SetEnabled(&a.messageEnabled, enabled) }
+func (a *Agent) SetCaptureEnabled(enabled bool) { a.SetEnabled(&a.captureEnabled, enabled) }
 
-func (a *Agent) shouldCaptureIncomingJPEG(autoUnlock bool) bool {
-	return autoUnlock && a.cfg.IncomingJPEGDir != ""
+func (a *Agent) shouldCaptureIncomingJPEG(captureImages bool) bool {
+	return captureImages && a.cfg.IncomingJPEGDir != ""
+}
+
+func runIfContextsActive(action func(), contexts ...context.Context) bool {
+	for _, ctx := range contexts {
+		if ctx.Err() != nil {
+			return false
+		}
+	}
+	action()
+	return true
 }
 
 func (a *Agent) unlockCallerAllowed(caller string) bool {

@@ -8,9 +8,10 @@
 // - Config file is loaded ONLY when -config is explicitly provided (no implicit ./config.json).
 // - Flags override JSON config.
 // - URI hiding/refactor is postponed (keep register_uri/message_uri/entrance_uri as-is).
-// - Split "enabled" into 2 toggles:
+// - Split "enabled" into independent toggles:
 //     * answer_calls: whether to Answer INVITE (otherwise reject)
 //     * send_messages: whether to send MESSAGE (initial/entrance)
+//     * capture_images: whether to capture incoming-ring JPEGs
 //
 // Notes:
 // - Allowed callers can be specified multiple times: --allowed-caller alice --allowed-caller bob
@@ -102,9 +103,9 @@ type Config struct {
 	MonitorJPEGInterval Duration `json:"monitor_jpeg_interval,omitempty"`
 	JPEGQueryS          string   `json:"jpeg_query_s"`
 
-	// Incoming ring JPEG capture. When automatic unlock is enabled at ring
-	// time, a non-empty directory enables a reliable early dialog (183/PRACK)
-	// and saves one timestamped JPEG per call.
+	// Incoming ring JPEG capture. When capture_images is enabled at ring time,
+	// a non-empty directory enables a reliable early dialog (183/PRACK) and
+	// saves one timestamped JPEG per call.
 	IncomingJPEGDir      string   `json:"incoming_jpeg_dir,omitempty"`
 	IncomingJPEGHold     Duration `json:"incoming_jpeg_hold,omitempty"`
 	IncomingJPEGInterval Duration `json:"incoming_jpeg_interval,omitempty"`
@@ -117,8 +118,15 @@ type Config struct {
 	EntranceBody        string `json:"entrance_body"`
 
 	// Behavior toggles
-	AnswerCalls  bool `json:"answer_calls"`
-	SendMessages bool `json:"send_messages"`
+	AnswerCalls   bool `json:"answer_calls"`
+	SendMessages  bool `json:"send_messages"`
+	CaptureImages bool `json:"capture_images"`
+
+	// captureImagesSet records whether capture_images has an independent startup
+	// value. It is intentionally not serialized. Only legacy configurations
+	// that explicitly set send_messages while omitting capture_images leave this
+	// false and inherit send_messages at startup.
+	captureImagesSet bool
 
 	// Reject behavior when not answering
 	RejectStatus int    `json:"reject_status"` // 480, 486, or 503
@@ -153,8 +161,10 @@ func DefaultConfig() Config {
 		ContactParams:        ";+l.operator.docomo.intercom",
 		Expiry:               Duration{Duration: 600 * time.Second},
 		RetryInterval:        Duration{Duration: 30 * time.Second},
-		AnswerCalls:          true,
-		SendMessages:         true,
+		AnswerCalls:          false,
+		SendMessages:         false,
+		CaptureImages:        true,
+		captureImagesSet:     true,
 		RejectStatus:         503,
 		RejectReason:         "Service Unavailable",
 		HTTPListen:           "127.0.0.1:18080",
@@ -185,6 +195,16 @@ func LoadConfigFile(path string) (Config, error) {
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return cfg, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return cfg, err
+	}
+	_, captureImagesPresent := fields["capture_images"]
+	_, sendMessagesPresent := fields["send_messages"]
+	cfg.captureImagesSet = captureImagesPresent || !sendMessagesPresent
+	if !cfg.captureImagesSet {
+		cfg.CaptureImages = cfg.SendMessages
 	}
 	return cfg, nil
 }
@@ -258,6 +278,7 @@ func ParseFlags(args []string) (Config, error) {
 
 	fs.BoolVar(&cfg.AnswerCalls, "answer-calls", cfg.AnswerCalls, "Answer incoming INVITE calls")
 	fs.BoolVar(&cfg.SendMessages, "send-messages", cfg.SendMessages, "Send SIP MESSAGE (initial/entrance)")
+	fs.BoolVar(&cfg.CaptureImages, "capture-images", cfg.CaptureImages, "Capture timestamped JPEGs from incoming rings")
 
 	fs.IntVar(&cfg.RejectStatus, "reject-code", cfg.RejectStatus, "Reject status code when not answering (480, 486, or 503)")
 	fs.StringVar(&cfg.RejectReason, "reject-reason", cfg.RejectReason, "Reject reason phrase when not answering")
@@ -276,7 +297,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.StringVar(&cfg.MonitorJPEGOut, "monitor-jpeg-out", cfg.MonitorJPEGOut, "Absolute path atomically updated with the latest valid monitor JPEG")
 	fs.DurationVar(&cfg.MonitorJPEGInterval.Duration, "monitor-jpeg-interval", cfg.MonitorJPEGInterval.Duration, "Minimum interval between monitor JPEG requests")
 	fs.StringVar(&cfg.JPEGQueryS, "jpeg-query-s", cfg.JPEGQueryS, "Value of the IFBOX JPEG HTTP query parameter s")
-	fs.StringVar(&cfg.IncomingJPEGDir, "incoming-jpeg-dir", cfg.IncomingJPEGDir, "Absolute directory for timestamped JPEGs captured during automatic unlock")
+	fs.StringVar(&cfg.IncomingJPEGDir, "incoming-jpeg-dir", cfg.IncomingJPEGDir, "Absolute directory for timestamped JPEGs captured from incoming rings")
 	fs.DurationVar(&cfg.IncomingJPEGHold.Duration, "incoming-jpeg-hold", cfg.IncomingJPEGHold.Duration, "How long to poll JPEGs for each incoming ring")
 	fs.DurationVar(&cfg.IncomingJPEGInterval.Duration, "incoming-jpeg-interval", cfg.IncomingJPEGInterval.Duration, "Minimum interval between incoming-ring JPEG requests")
 	fs.IntVar(&cfg.IncomingJPEGMaxFiles, "incoming-jpeg-max-files", cfg.IncomingJPEGMaxFiles, "Maximum number of timestamped incoming-ring JPEGs retained")
@@ -302,6 +323,16 @@ func ParseFlags(args []string) (Config, error) {
 
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
+	}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "capture-images" {
+			cfg.captureImagesSet = true
+		}
+	})
+	if !cfg.captureImagesSet {
+		// Preserve the historical coupling only while loading old startup
+		// configurations. Runtime state updates remain independent.
+		cfg.CaptureImages = cfg.SendMessages
 	}
 
 	// Positional args are not supported.

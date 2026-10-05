@@ -38,8 +38,9 @@
   "entrance_content_type": "application/intercom.message+xml",
   "entrance_body": "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\r\n<IFBOX version = \"1.0\">\r\n    <SYSTEM>\r\n        <SYS_COMMAND>\r\n            <USER_COMM  state = \"request\"  type = \"lock\">UNLOCK</USER_COMM>\r\n        </SYS_COMMAND>\r\n    </SYSTEM>\r\n</IFBOX>\r\n",
 
-  "answer_calls": true,
-  "send_messages": true,
+  "answer_calls": false,
+  "send_messages": false,
+  "capture_images": true,
   "reject_status": 503,
   "reject_reason": "Service Unavailable",
 

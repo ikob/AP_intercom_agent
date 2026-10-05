@@ -37,3 +37,23 @@ func TestNewAgentInvalidEntranceURI(t *testing.T) {
 		t.Fatal("expected error for invalid entrance uri")
 	}
 }
+
+func TestNewAgentInitializesIndependentRuntimeStates(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RegisterURI = "sip:register@localhost"
+	cfg.MessageURI = "sip:message@localhost"
+	cfg.EntranceURI = "sip:entrance@localhost"
+	cfg.AnswerCalls = false
+	cfg.SendMessages = false
+	cfg.CaptureImages = true
+
+	agent, err := NewAgent(cfg, NewMessageBuffer(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(agent.Close)
+
+	if agent.answerEnabled.Load() || agent.messageEnabled.Load() || !agent.captureEnabled.Load() {
+		t.Fatalf("runtime states answer=%v message=%v capture=%v, want false/false/true", agent.answerEnabled.Load(), agent.messageEnabled.Load(), agent.captureEnabled.Load())
+	}
+}

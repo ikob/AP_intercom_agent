@@ -28,12 +28,26 @@ other outcome arising from its use or inability to operate.
 生じる損失、損害、セキュリティ事故、プライバシー侵害、その他いかなる結果についても
 責任を負いません。
 
-# How to use it.
+# AIPHONE Intercom Image Agent
+
+This SIP agent saves a timestamped JPEG snapshot from each allowed incoming
+intercom ring. Optional automatic unlocking is controlled separately.
+
+## How to use it
 
 Set `AP_INTERCOM_PASSWORD` in the environment, then run the SIP agent as:
 
 ```bash
-go run . --username cellphone0 -allowed-caller interphone0 -register-uri sip:cellphone0@<IP address>:5060 -message-uri sip:housing@<IP address>:5060 -entrance-uri sip:housing@<IP address>:5060 -answer-calls=true -send-messages=true
+go run . \
+  -username cellphone0 \
+  -allowed-caller interphone0 \
+  -register-uri sip:cellphone0@<IP address>:5060 \
+  -message-uri sip:housing@<IP address>:5060 \
+  -entrance-uri sip:housing@<IP address>:5060 \
+  -incoming-jpeg-dir /tmp/aiphone-rings \
+  -answer-calls=false \
+  -capture-images=true \
+  -send-messages=false
 ```
 
 For local VS Code debugging, copy `.env.example` to `.env` and set
@@ -88,13 +102,14 @@ successful run ends with `Monitor probe completed ... result=pass` and exits.
 ## JPEG capture for incoming rings
 
 The registered agent can save an entrance image for every allowed incoming
-ring while `send_messages` is enabled. Whether the call is answered afterward
-is controlled independently:
+ring while `capture_images` is enabled. Image capture, automatic unlock, and
+whether the call is answered afterward are controlled independently:
 
 ```bash
 go run . -config /path/to/config.json \
-  -answer-calls=true \
-  -send-messages=true \
+  -answer-calls=false \
+  -capture-images=true \
+  -send-messages=false \
   -incoming-jpeg-dir /tmp/aiphone-rings \
   -incoming-jpeg-hold 5s \
   -incoming-jpeg-interval 1s \
@@ -103,24 +118,35 @@ go run . -config /path/to/config.json \
   -reject-reason "Busy Here"
 ```
 
-The runtime `send_messages` state is the automatic-unlock mode switch. The
-agent captures an image only when that state is ON at the instant the ring
-arrives and `incoming_jpeg_dir` is configured. The same state snapshot gates
-the unlock MESSAGE, while `unlock_callers` is a second, caller-specific safety
-allow-list. A Home Assistant state change during the call therefore cannot
-split the decisions. `answer_calls` remains independent and should normally
-stay true in the tested installation to avoid a Busy/congestion indication.
-After JPEG capture, the agent answers, waits approximately one second, and
-sends BYE. If `answer_calls` is false, it sends the configured final rejection
-instead, and the caller may display Busy or congestion.
+The runtime `capture_images` state controls JPEG capture and requires a
+configured `incoming_jpeg_dir`. The runtime `send_messages` state controls
+automatic unlock, and its value at startup also gates the initial generic
+MESSAGE. `unlock_callers` is a second, caller-specific safety allow-list for the
+unlock MESSAGE. The agent snapshots the capture and automatic-unlock states
+independently when each allowed ring arrives, so a state change during a call
+affects only later calls.
+
+New flag-based configurations default to image capture ON and automatic unlock
+OFF. For compatibility, a legacy JSON configuration that explicitly contains
+`send_messages` but omits `capture_images` inherits the `send_messages` value
+for image capture at startup. Once explicitly configured, `capture_images` and
+`send_messages` are independent. HTTP `POST /v1/state` is a partial update:
+omitted fields retain their current values.
+
+`answer_calls` remains independent. When it is true, the agent answers after
+JPEG capture, waits approximately one second, and sends BYE. When it is false,
+the agent sends the configured final rejection instead, and the caller may
+display Busy or congestion.
 
 For each qualifying call, the agent sends a reliable `183 Session Progress`
-with the audio and HTTP/JPEG SDP, then immediately sends the unlock MESSAGE only
-if the caller is in `unlock_callers`. It accepts the IFBOX-specific PRACK and
+with the audio and HTTP/JPEG SDP. If automatic unlock is independently enabled,
+it immediately sends the unlock MESSAGE only when the caller is in
+`unlock_callers`. It accepts the IFBOX-specific PRACK and
 begins HTTP polling after replying `200 OK` to PRACK. Polling stops before the
 final response. It then either answers and sends BYE (`answer_calls=true`) or
 sends the configured rejection (`answer_calls=false`). If capture setup fails
-before `183`, an eligible caller is still unlocked.
+before `183` while the application and dialog remain active, an eligible caller
+is still unlocked.
 
 One timestamped file is retained per ring, for example
 `20261004T214123.123456789+0900_interphone0.jpg`. Frames received during that
