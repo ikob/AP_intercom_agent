@@ -1,0 +1,22 @@
+# Run alongside the agent: go2rtc -config go2rtc.yaml
+# Loopback defaults assume the agent, go2rtc and HA share the host network.
+api:
+  listen: "127.0.0.1:1984"
+rtsp:
+  listen: "127.0.0.1:8554"
+webrtc:
+  listen: ""
+
+streams:
+  intercom:
+    - "ffmpeg:http://127.0.0.1:18080/v1/camera.mjpeg#input=intercom_mjpeg#video=h264"
+
+ffmpeg:
+  # Avoid multi-second probing and the demuxer's assumed 25 fps timestamps.
+  # Wallclock timestamps preserve the arrival cadence of the 2 fps JPEGs.
+  intercom_mjpeg: "-flags low_delay -probesize 32 -analyzeduration 0 -f mpjpeg -use_wallclock_as_timestamps 1 -i {input}"
+  # Emit one keyframe per second and signal the actual 2 fps rate to H.264/HLS.
+  # The filter normalizes timing but does not synthesize intermediate motion.
+  h264: "-c:v libx264 -preset:v superfast -tune:v zerolatency -profile:v baseline -level:v 3.1 -pix_fmt:v yuv420p -g 2 -bf 0 -x264-params force-cfr=1 -vf fps=2 -r 2 -fps_mode cfr"
+
+# No preload: go2rtc starts FFmpeg on demand and stops it after the last viewer.

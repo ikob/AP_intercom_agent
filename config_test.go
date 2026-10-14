@@ -42,6 +42,9 @@ func TestDefaultConfigUsesSafeRuntimeControls(t *testing.T) {
 	if cfg.AnswerCalls || cfg.SendMessages || !cfg.CaptureImages {
 		t.Fatalf("defaults answer=%v send=%v capture=%v, want false/false/true", cfg.AnswerCalls, cfg.SendMessages, cfg.CaptureImages)
 	}
+	if cfg.MonitorJPEGInterval.Duration != time.Second/2 {
+		t.Fatalf("monitor JPEG interval = %v, want %v", cfg.MonitorJPEGInterval.Duration, time.Second/2)
+	}
 }
 
 func TestLoadConfigFile(t *testing.T) {
@@ -181,6 +184,41 @@ func TestParseFlagsNoConfigNeeded(t *testing.T) {
 	}
 	if cfg.AnswerCalls || cfg.SendMessages || !cfg.CaptureImages {
 		t.Fatalf("safe defaults answer=%v send=%v capture=%v, want false/false/true", cfg.AnswerCalls, cfg.SendMessages, cfg.CaptureImages)
+	}
+}
+
+func TestParseFlagsRingWebhookURL(t *testing.T) {
+	t.Setenv(ringWebhookEnvVar, "")
+	args := append(requiredArgs(), "-ring-webhook-url=http://127.0.0.1:8123/api/webhook/test-secret")
+	cfg, err := ParseFlags(args)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.RingWebhookURL != "http://127.0.0.1:8123/api/webhook/test-secret" {
+		t.Fatalf("ring webhook URL = %q", cfg.RingWebhookURL)
+	}
+}
+
+func TestParseFlagsRingWebhookURLFromEnvironment(t *testing.T) {
+	t.Setenv(ringWebhookEnvVar, "http://127.0.0.1:8123/api/webhook/environment-secret")
+	cfg, err := ParseFlags(requiredArgs())
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.RingWebhookURL != "http://127.0.0.1:8123/api/webhook/environment-secret" {
+		t.Fatalf("ring webhook URL = %q", cfg.RingWebhookURL)
+	}
+}
+
+func TestParseFlagsRejectsInvalidRingWebhookURL(t *testing.T) {
+	t.Setenv(ringWebhookEnvVar, "")
+	for _, value := range []string{"relative/path", "ftp://example.com/hook", "http://user:pass@example.com/hook", "http://example.com/hook#fragment"} {
+		t.Run(value, func(t *testing.T) {
+			args := append(requiredArgs(), "-ring-webhook-url="+value)
+			if _, err := ParseFlags(args); err == nil || !strings.Contains(err.Error(), "ring-webhook-url") {
+				t.Fatalf("ParseFlags error = %v, want ring-webhook-url validation error", err)
+			}
+		})
 	}
 }
 
@@ -378,11 +416,29 @@ func TestParseFlagsMonitorProbe(t *testing.T) {
 	}
 }
 
-func TestParseFlagsMonitorProbeRequiresURI(t *testing.T) {
+func TestParseFlagsDerivesMonitorURIFromProxy(t *testing.T) {
 	args := append(requiredArgs(), "-monitor-probe")
-	_, err := ParseFlags(args)
-	if err == nil || !strings.Contains(err.Error(), "monitor-uri") {
-		t.Fatalf("expected monitor-uri error, got %v", err)
+	cfg, err := ParseFlags(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MonitorURI != "sip:monitor@proxy" {
+		t.Fatalf("monitor URI = %q, want sip:monitor@proxy", cfg.MonitorURI)
+	}
+}
+
+func TestMonitorURIFromProxy(t *testing.T) {
+	for _, test := range []struct {
+		proxy string
+		want  string
+	}{
+		{proxy: "192.168.100.25:5060", want: "sip:monitor@192.168.100.25"},
+		{proxy: "ifbox:5060", want: "sip:monitor@ifbox"},
+		{proxy: "[2001:db8::25]:5060", want: "sip:monitor@[2001:db8::25]"},
+	} {
+		if got := monitorURIFromProxy(test.proxy); got != test.want {
+			t.Errorf("monitorURIFromProxy(%q) = %q, want %q", test.proxy, got, test.want)
+		}
 	}
 }
 

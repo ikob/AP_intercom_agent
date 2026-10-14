@@ -316,10 +316,41 @@ func (a *Agent) pollMonitorJPEG(ctx context.Context, output string, interval tim
 	if err != nil {
 		return 0, false, err
 	}
-	return pollMonitorJPEGEndpoint(ctx, endpoint, output, interval)
+	return pollMonitorJPEGEndpoint(ctx, endpoint, output, interval, func(frame monitorJPEGFrame) error {
+		return a.storeMonitorJPEGFrame(output, frame)
+	})
 }
 
-func pollMonitorJPEGEndpoint(ctx context.Context, endpoint *url.URL, output string, interval time.Duration) (frames int, changed bool, err error) {
+type monitorJPEGFrameHandler func(monitorJPEGFrame) error
+
+func (a *Agent) storeMonitorJPEGFrame(output string, frame monitorJPEGFrame) error {
+	if err := a.publishMonitorJPEGFrame(frame); err != nil {
+		return err
+	}
+	return writeMonitorJPEGAtomic(output, frame.Data)
+}
+
+func (a *Agent) storeIncomingMonitorJPEGFrame(output string, frame monitorJPEGFrame) error {
+	if err := a.publishMonitorJPEGFrame(frame); err != nil {
+		return err
+	}
+	if err := writeMonitorJPEGAtomic(output, frame.Data); err != nil {
+		slog.Warn("Failed to store incoming monitor JPEG frame", "output", output, "error", err)
+	}
+	return nil
+}
+
+func (a *Agent) publishMonitorJPEGFrame(frame monitorJPEGFrame) error {
+	if a.frameHub == nil {
+		return nil
+	}
+	if err := a.frameHub.Publish(frame); err != nil {
+		return fmt.Errorf("publish monitor JPEG: %w", err)
+	}
+	return nil
+}
+
+func pollMonitorJPEGEndpoint(ctx context.Context, endpoint *url.URL, output string, interval time.Duration, handleFrame monitorJPEGFrameHandler) (frames int, changed bool, err error) {
 	client, transport := newMonitorHTTPClient()
 	defer transport.CloseIdleConnections()
 
@@ -341,8 +372,10 @@ func pollMonitorJPEGEndpoint(ctx context.Context, endpoint *url.URL, output stri
 			}
 			return frames, changed, err
 		}
-		if err := writeMonitorJPEGAtomic(output, frame.Data); err != nil {
-			return frames, changed, err
+		if handleFrame != nil {
+			if err := handleFrame(frame); err != nil {
+				return frames, changed, err
+			}
 		}
 		frames++
 		if frames == 1 {

@@ -33,14 +33,15 @@ func TestBuildMonitorOffer(t *testing.T) {
 		"a=maxptime:20\r\n" +
 		"a=sendrecv\r\n")
 
-	offer, err := buildMonitorOffer(base, "cellphone0")
+	offer, err := buildMonitorOffer(base, "cellphone0", "192.0.2.20")
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := string(offer)
 	for _, want := range []string{
-		"o=cellphone0 1 1 IN IP4 192.0.2.10\r\n",
+		"o=cellphone0 1 1 IN IP4 192.0.2.20\r\n",
 		"s=session\r\n",
+		"c=IN IP4 192.0.2.20\r\n",
 		"m=audio 20000 RTP/AVP 0\r\n",
 		"m=video 8080 HTTP jpeg\r\n",
 		"a=recvonly\r\n",

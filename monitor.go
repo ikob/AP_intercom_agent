@@ -71,7 +71,11 @@ func (a *Agent) StopMonitor(ctx context.Context) error {
 	a.monitorMu.Unlock()
 
 	callID := monitorCallID(dialog)
-	byeErr := dialog.Hangup(ctx)
+	remoteEnded := dialog.Context().Err() != nil
+	var byeErr error
+	if !remoteEnded {
+		byeErr = dialog.Hangup(ctx)
+	}
 	closeErr := dialog.Close()
 
 	a.monitorMu.Lock()
@@ -81,10 +85,21 @@ func (a *Agent) StopMonitor(ctx context.Context) error {
 	}
 	a.monitorMu.Unlock()
 
-	if byeErr == nil {
+	if remoteEnded {
+		slog.Info("Monitor ended by remote", "call_id", callID)
+	} else if byeErr == nil {
 		slog.Info("Monitor BYE completed", "call_id", callID, "status", 200)
 	}
 	return errors.Join(byeErr, closeErr)
+}
+
+func (a *Agent) monitorDone() <-chan struct{} {
+	a.monitorMu.Lock()
+	defer a.monitorMu.Unlock()
+	if a.monitorState != monitorConfirmed || a.monitorDialog == nil {
+		return nil
+	}
+	return a.monitorDialog.Context().Done()
 }
 
 func (a *Agent) dialMonitor(ctx context.Context) (_ *diago.DialogClientSession, retErr error) {
@@ -100,7 +115,7 @@ func (a *Agent) dialMonitor(ctx context.Context) (_ *diago.DialogClientSession, 
 
 	mediaSession := dialog.MediaSession()
 	mediaSession.Codecs = []media.Codec{media.CodecAudioUlaw}
-	offer, err := buildMonitorOffer(mediaSession.LocalSDP(), a.cfg.Username)
+	offer, err := buildMonitorOffer(mediaSession.LocalSDP(), a.cfg.Username, a.cfg.ContactHost)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +220,7 @@ func headerHasToken(value, want string) bool {
 	return false
 }
 
-func buildMonitorOffer(base []byte, username string) ([]byte, error) {
+func buildMonitorOffer(base []byte, username, advertisedHost string) ([]byte, error) {
 	if username == "" {
 		username = "-"
 	}
@@ -218,10 +233,22 @@ func buildMonitorOffer(base []byte, username string) ([]byte, error) {
 		switch {
 		case strings.HasPrefix(line, "o="):
 			fields := strings.Fields(line)
-			if len(fields) < 2 {
+			if len(fields) < 6 {
 				return nil, fmt.Errorf("invalid SDP origin line %q", line)
 			}
 			fields[0] = "o=" + username
+			if advertisedHost != "" {
+				fields[5] = advertisedHost
+			}
+			line = strings.Join(fields, " ")
+		case strings.HasPrefix(line, "c="):
+			fields := strings.Fields(line)
+			if len(fields) < 3 {
+				return nil, fmt.Errorf("invalid SDP connection line %q", line)
+			}
+			if advertisedHost != "" {
+				fields[2] = advertisedHost
+			}
 			line = strings.Join(fields, " ")
 		case strings.HasPrefix(line, "s="):
 			line = "s=session"

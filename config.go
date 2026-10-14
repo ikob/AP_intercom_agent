@@ -24,13 +24,17 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-const passwordEnvVar = "AP_INTERCOM_PASSWORD"
+const (
+	passwordEnvVar    = "AP_INTERCOM_PASSWORD"
+	ringWebhookEnvVar = "AP_INTERCOM_RING_WEBHOOK_URL"
+)
 
 // Duration is a JSON-friendly duration.
 // It accepts either a JSON string (e.g. "3600s") or a number (seconds).
@@ -135,6 +139,10 @@ type Config struct {
 	// HTTP control plane (optional)
 	HTTPListen string `json:"http_listen"` // e.g. "127.0.0.1:18080"
 
+	// Optional Home Assistant webhook notified for each allowed incoming ring.
+	// The URL contains the secret webhook ID and must not be logged or exposed.
+	RingWebhookURL string `json:"ring_webhook_url,omitempty"`
+
 	// Inbound MESSAGE buffer
 	InboundMessageBuffer int `json:"inbound_message_buffer"`
 
@@ -175,7 +183,7 @@ func DefaultConfig() Config {
 		EntranceBody:         "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\r\n<IFBOX version = \"1.0\">\r\n    <SYSTEM>\r\n        <SYS_COMMAND>\r\n            <USER_COMM  state = \"request\"  type = \"lock\">UNLOCK</USER_COMM>\r\n        </SYS_COMMAND>\r\n    </SYSTEM>\r\n</IFBOX>\r\n",
 		MonitorHold:          Duration{Duration: 3 * time.Second},
 		MonitorRepeat:        2,
-		MonitorJPEGInterval:  Duration{Duration: time.Second},
+		MonitorJPEGInterval:  Duration{Duration: time.Second / 2},
 		JPEGQueryS:           defaultJPEGQueryS,
 		IncomingJPEGHold:     Duration{Duration: 5 * time.Second},
 		IncomingJPEGInterval: Duration{Duration: time.Second},
@@ -253,6 +261,9 @@ func ParseFlags(args []string) (Config, error) {
 	if cfg.Password == "" {
 		cfg.Password = os.Getenv(passwordEnvVar)
 	}
+	if cfg.RingWebhookURL == "" {
+		cfg.RingWebhookURL = os.Getenv(ringWebhookEnvVar)
+	}
 
 	fs := flag.NewFlagSet("entrance-go", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -284,6 +295,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.StringVar(&cfg.RejectReason, "reject-reason", cfg.RejectReason, "Reject reason phrase when not answering")
 
 	fs.StringVar(&cfg.HTTPListen, "http", cfg.HTTPListen, "HTTP listen address (empty disables HTTP)")
+	fs.StringVar(&cfg.RingWebhookURL, "ring-webhook-url", cfg.RingWebhookURL, "Home Assistant webhook URL notified for allowed incoming rings")
 	fs.IntVar(&cfg.InboundMessageBuffer, "msgbuf", cfg.InboundMessageBuffer, "Inbound MESSAGE buffer size")
 
 	// Keep URI flags for now (URI hiding postponed)
@@ -291,7 +303,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.StringVar(&cfg.MessageURI, "message-uri", cfg.MessageURI, "MESSAGE target SIP URI (required)")
 	fs.StringVar(&cfg.EntranceURI, "entrance-uri", cfg.EntranceURI, "Entrance target SIP URI (required)")
 	fs.BoolVar(&cfg.MonitorProbe, "monitor-probe", cfg.MonitorProbe, "Run the one-shot SIP monitor probe and exit")
-	fs.StringVar(&cfg.MonitorURI, "monitor-uri", cfg.MonitorURI, "Monitor target SIP URI (required with --monitor-probe)")
+	fs.StringVar(&cfg.MonitorURI, "monitor-uri", cfg.MonitorURI, "Monitor target SIP URI (defaults to sip:monitor@<proxy host>)")
 	fs.DurationVar(&cfg.MonitorHold.Duration, "monitor-hold", cfg.MonitorHold.Duration, "How long each probe dialog remains established")
 	fs.IntVar(&cfg.MonitorRepeat, "monitor-repeat", cfg.MonitorRepeat, "Number of sequential monitor dialogs in probe mode")
 	fs.StringVar(&cfg.MonitorJPEGOut, "monitor-jpeg-out", cfg.MonitorJPEGOut, "Absolute path atomically updated with the latest valid monitor JPEG")
@@ -363,6 +375,9 @@ func ParseFlags(args []string) (Config, error) {
 	if len(missing) > 0 {
 		return cfg, missingRequiredError(missing)
 	}
+	if cfg.MonitorURI == "" {
+		cfg.MonitorURI = monitorURIFromProxy(cfg.ProxyHost)
+	}
 
 	if cfg.RejectStatus != 480 && cfg.RejectStatus != 486 && cfg.RejectStatus != 503 {
 		return cfg, fmt.Errorf("reject-code must be 480, 486, or 503")
@@ -409,8 +424,27 @@ func ParseFlags(args []string) (Config, error) {
 			return cfg, fmt.Errorf("incoming-jpeg-max-files must be at least 1")
 		}
 	}
+	cfg.RingWebhookURL = strings.TrimSpace(cfg.RingWebhookURL)
+	if err := validateRingWebhookURL(cfg.RingWebhookURL); err != nil {
+		return cfg, err
+	}
 
 	return cfg, nil
+}
+
+func monitorURIFromProxy(proxyHost string) string {
+	host := strings.TrimSpace(proxyHost)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return ""
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return "sip:monitor@" + host
 }
 
 type StringList []string

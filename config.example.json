@@ -24,7 +24,7 @@
   "monitor_hold": "5s",
   "monitor_repeat": 1,
   "monitor_jpeg_out": "",
-  "monitor_jpeg_interval": "1s",
+  "monitor_jpeg_interval": "500ms",
   "jpeg_query_s": "cd188d8e518cb12ad7a644f23928f64f",
 
   "incoming_jpeg_dir": "",
@@ -45,6 +45,7 @@
   "reject_reason": "Service Unavailable",
 
   "http_listen": "127.0.0.1:18080",
+  "ring_webhook_url": "",
   "inbound_message_buffer": 100,
 
   "allowed_callers": ["interphone0", "interphone1"],

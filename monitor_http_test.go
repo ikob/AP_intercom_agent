@@ -248,3 +248,15 @@ func TestWriteMonitorJPEGAtomic(t *testing.T) {
 		t.Fatalf("expected symlink rejection, got %v", err)
 	}
 }
+
+func TestIncomingMonitorFramePublishesWhenStorageFails(t *testing.T) {
+	agent := &Agent{frameHub: NewFrameHub()}
+	want := testHubFrame(t, color.RGBA{R: 25, G: 50, B: 75, A: 255})
+	if err := agent.storeIncomingMonitorJPEGFrame("relative-output.jpg", want); err != nil {
+		t.Fatalf("storeIncomingMonitorJPEGFrame: %v", err)
+	}
+	got, ok := agent.frameHub.Snapshot()
+	if !ok || !bytes.Equal(got.Data, want.Data) {
+		t.Fatal("storage failure prevented live frame publication")
+	}
+}

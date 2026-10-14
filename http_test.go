@@ -30,12 +30,14 @@ func startHTTPTestServer(t *testing.T) (string, context.CancelFunc, *Agent, *Con
 	ctx, cancel := context.WithCancel(context.Background())
 	addr := freeTCPAddr(t)
 
-	agent := &Agent{}
+	agent := &Agent{frameHub: NewFrameHub()}
 	agent.answerEnabled.Store(true)
 	agent.messageEnabled.Store(false)
 	agent.captureEnabled.Store(true)
 
 	cfg := DefaultConfig()
+	cfg.Password = "http-test-secret"
+	cfg.RingWebhookURL = "http://127.0.0.1:8123/api/webhook/http-test-secret"
 	cfg.LoadedConfigPath = "/tmp/config.json"
 	msg := NewMessageBuffer(2)
 	msg.Add(InboundMessage{CallID: "id-1", Body: []byte("hello")})
@@ -111,6 +113,12 @@ func TestHTTPHealthzAndConfig(t *testing.T) {
 	config, ok := payload["config"].(map[string]any)
 	if !ok || config["capture_images"] != true {
 		t.Fatalf("config does not expose capture_images: %#v", payload["config"])
+	}
+	if config["password"] != "" || payload["password_configured"] != true {
+		t.Fatalf("config password was not safely redacted: %#v", payload)
+	}
+	if value, present := config["ring_webhook_url"]; (present && value != "") || payload["ring_webhook_configured"] != true {
+		t.Fatalf("ring webhook URL was not safely redacted: %#v", payload)
 	}
 }
 

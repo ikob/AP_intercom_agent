@@ -149,7 +149,9 @@ func (a *Agent) captureIncomingRing(parent context.Context, dialog *diago.Dialog
 	}
 
 	pollCtx, cancelPoll := context.WithTimeout(callCtx, a.cfg.IncomingJPEGHold.Duration)
-	frames, changed, pollErr := pollMonitorJPEGEndpoint(pollCtx, endpoint, output, a.cfg.IncomingJPEGInterval.Duration)
+	frames, changed, pollErr := pollMonitorJPEGEndpoint(pollCtx, endpoint, output, a.cfg.IncomingJPEGInterval.Duration, func(frame monitorJPEGFrame) error {
+		return a.storeIncomingMonitorJPEGFrame(output, frame)
+	})
 	cancelPoll()
 	pruneAfterCapture = frames > 0
 	slog.Info("Incoming ring JPEG polling completed",

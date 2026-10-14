@@ -8,15 +8,17 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
 
 type HTTPServer struct {
-	srv   *http.Server
-	agent *Agent
-	cfg   *Config
-	msg   *MessageBuffer
+	srv    *http.Server
+	agent  *Agent
+	cfg    *Config
+	msg    *MessageBuffer
+	camera *cameraMonitorController
 }
 
 func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, msg *MessageBuffer) *HTTPServer {
@@ -29,6 +31,14 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 		cfg:   cfg,
 		msg:   msg,
 	}
+	if agent != nil && agent.cfg.MonitorURI != "" {
+		h.camera = newCameraMonitorController(
+			ctx,
+			agent,
+			defaultCameraMonitorIdleTimeout,
+			agent.cfg.MonitorJPEGInterval.Duration,
+		)
+	}
 
 	mux := http.NewServeMux()
 
@@ -40,10 +50,17 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		publicConfig := *cfg
+		passwordConfigured := publicConfig.Password != ""
+		ringWebhookConfigured := publicConfig.RingWebhookURL != ""
+		publicConfig.Password = ""
+		publicConfig.RingWebhookURL = ""
 
 		resp := map[string]any{
-			"config_path": cfg.LoadedConfigPath,
-			"config":      cfg,
+			"config_path":             cfg.LoadedConfigPath,
+			"config":                  &publicConfig,
+			"password_configured":     passwordConfigured,
+			"ring_webhook_configured": ringWebhookConfigured,
 			"runtime": map[string]any{
 				"answer_calls":   agent.answerEnabled.Load(),
 				"send_messages":  agent.messageEnabled.Load(),
@@ -136,11 +153,16 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(msg.Snapshot())
 	})
+	mux.HandleFunc("/v1/camera.jpg", h.handleCameraSnapshot)
+	mux.HandleFunc("/v1/camera.mjpeg", h.handleCameraMJPEG)
 
 	h.srv = &http.Server{
 		Addr:              listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		BaseContext: func(net.Listener) context.Context {
+			return ctx
+		},
 	}
 
 	go func() {
@@ -158,4 +180,16 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 	}()
 
 	return h
+}
+
+func (h *HTTPServer) WaitCameraStopped(ctx context.Context) error {
+	if h == nil || h.camera == nil {
+		return nil
+	}
+	select {
+	case <-h.camera.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

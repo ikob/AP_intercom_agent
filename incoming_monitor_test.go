@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image/color"
@@ -353,6 +354,10 @@ func TestIncomingJPEGCaptureAndAutomaticUnlockModes(t *testing.T) {
 				}
 				if len(data) == 0 {
 					t.Fatal("output is empty")
+				}
+				frame, ok := agent.frameHub.Snapshot()
+				if !ok || !bytes.Equal(frame.Data, jpegData) {
+					t.Fatal("captured JPEG was not published to the live frame hub")
 				}
 			}
 

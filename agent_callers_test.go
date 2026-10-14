@@ -4,7 +4,12 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/emiago/diago"
 	"github.com/emiago/sipgo"
@@ -86,5 +91,58 @@ func TestCallerAllowedUserWhitelisted(t *testing.T) {
 
 	if !a.callerAllowedFromInvite(dialogWithInvite(req)) {
 		t.Fatal("expected allow when caller is in whitelist")
+	}
+}
+
+func TestNotifyRingWebhookDeduplicatesCallID(t *testing.T) {
+	requests := make(chan RingWebhookEvent, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("content type = %q, want application/json", r.Header.Get("Content-Type"))
+		}
+		var event RingWebhookEvent
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			t.Errorf("decode webhook: %v", err)
+		} else {
+			requests <- event
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	agent := &Agent{
+		cfg:             Config{RingWebhookURL: server.URL},
+		ringWebhookSeen: make(map[string]time.Time),
+	}
+
+	req := inviteWithFrom("interphone1", true)
+	callID := sip.CallIDHeader("ring-call-id")
+	req.AppendHeader(&callID)
+	dialog := dialogWithInvite(req)
+	dialog.ID = "ring-dialog-id"
+
+	if !agent.notifyRingWebhook(context.Background(), dialog, "interphone1") {
+		t.Fatal("first ring webhook was not scheduled")
+	}
+	var got RingWebhookEvent
+	select {
+	case got = <-requests:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ring webhook")
+	}
+	if got.Type != "ring" || got.Caller != "interphone1" || got.CallID != "ring-call-id" || got.DialogID != "ring-dialog-id" {
+		t.Fatalf("unexpected ring webhook: %+v", got)
+	}
+
+	if agent.notifyRingWebhook(context.Background(), dialog, "interphone1") {
+		t.Fatal("duplicate Call-ID scheduled a second ring webhook")
+	}
+	select {
+	case duplicate := <-requests:
+		t.Fatalf("received duplicate ring webhook: %+v", duplicate)
+	case <-time.After(25 * time.Millisecond):
 	}
 }

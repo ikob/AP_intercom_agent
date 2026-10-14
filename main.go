@@ -13,6 +13,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"syscall"
+	"time"
 )
 
 func main() {
@@ -22,7 +24,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	msgBuf := NewMessageBuffer(cfg.InboundMessageBuffer)
@@ -53,10 +55,15 @@ func main() {
 	}
 
 	// Optional HTTP control plane.
-	_ = StartHTTP(ctx, cfg.HTTPListen, agent, &cfg, msgBuf)
+	httpServer := StartHTTP(ctx, cfg.HTTPListen, agent, &cfg, msgBuf)
 
 	// Run until Ctrl+C.
 	if err := agent.Run(ctx); err != nil {
 		slog.Error("agent stopped with error", "error", err)
+	}
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 7*time.Second)
+	defer cancelWait()
+	if err := httpServer.WaitCameraStopped(waitCtx); err != nil {
+		slog.Warn("camera monitor did not stop before shutdown", "error", err)
 	}
 }

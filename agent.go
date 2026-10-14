@@ -51,6 +51,9 @@ type Agent struct {
 	prackWaiters       map[string]*inboundPRACKWaiter
 	incomingJPEGMu     sync.Mutex
 	incomingJPEGActive map[string]int
+	frameHub           *FrameHub
+	ringWebhookMu      sync.Mutex
+	ringWebhookSeen    map[string]time.Time
 
 	msgBuf         *MessageBuffer
 	regID          uint64
@@ -111,6 +114,8 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 		regDone:            make(chan struct{}),
 		prackWaiters:       make(map[string]*inboundPRACKWaiter),
 		incomingJPEGActive: make(map[string]int),
+		frameHub:           NewFrameHub(),
+		ringWebhookSeen:    make(map[string]time.Time),
 		msgBuf:             msgBuf,
 	}
 	a.srv.OnPrack(a.handleInboundPRACK)
@@ -229,6 +234,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				return
 			}
 			caller := callerFromInvite(inDialog)
+			a.notifyRingWebhook(ctx, inDialog, caller)
 
 			// Snapshot image capture and automatic unlock independently once for
 			// this call. Runtime changes affect only later calls.
