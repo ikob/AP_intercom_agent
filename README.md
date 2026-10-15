@@ -269,10 +269,19 @@ Install [go2rtc](https://github.com/AlexxIT/go2rtc/releases) and FFmpeg with
 go2rtc -config go2rtc.yaml
 ```
 
-The checked-in configuration uses loopback and is intended for processes sharing
-one host network. It exposes `rtsp://127.0.0.1:8554/intercom`; the Go agent
-continues to serve HTTP on port 18080. The sidecar is a separate process and
-must be started/supervised separately. No change to the SIP agent flags is needed.
+The checked-in configuration keeps its API and RTSP listeners on loopback for
+processes sharing one host network. It exposes
+`rtsp://127.0.0.1:8554/intercom`; the Go agent continues to serve HTTP on port
+18080. WebRTC media listens on TCP and UDP port 8555 so browsers can connect
+directly. The sidecar is a separate process and must be started/supervised
+separately. No change to the SIP agent flags is needed.
+
+Home Assistant's **WebRTC Camera** custom integration can connect to the
+existing go2rtc server at `http://127.0.0.1:1984/`. Use `intercom` as the card's
+stream URL and select WebRTC mode. Port 1984 remains local; only encrypted
+WebRTC media on port 8555 is reachable from the LAN. The default go2rtc STUN
+configuration is sufficient for initial testing and is not part of the media
+path.
 
 In Home Assistant's **Generic Camera** integration, configure:
 
@@ -324,10 +333,9 @@ The existing **MJPEG IP Camera** integration remains usable with
 also accepts the snapshot URL alone, but the raw MJPEG URL is not the H.264
 stream source supplied by this setup.
 
-RTSP output does not implement a Matter accessory. Future Matter camera support
-requires a Matter implementation and WebRTC session handling; this H.264 stage
-provides a reusable video source. WebRTC listening is disabled in the standalone
-configuration until that separate integration is configured.
+RTSP and WebRTC output do not implement a Matter accessory. Future Matter
+camera support still requires a Matter implementation; this H.264 stage
+provides a reusable video source.
 
 The HTTP camera is video-only. The SIP offer includes the IFBOX-compatible
 audio description, but the agent does not transmit RTP or expose audio through

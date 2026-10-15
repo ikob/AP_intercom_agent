@@ -1,11 +1,12 @@
 # Run alongside the agent: go2rtc -config go2rtc.yaml
-# Loopback defaults assume the agent, go2rtc and HA share the host network.
+# API and RTSP stay on loopback because the agent, go2rtc and HA share the
+# host network. WebRTC media must be reachable directly from browser clients.
 api:
   listen: "127.0.0.1:1984"
 rtsp:
   listen: "127.0.0.1:8554"
 webrtc:
-  listen: ""
+  listen: ":8555"
 
 streams:
   intercom:

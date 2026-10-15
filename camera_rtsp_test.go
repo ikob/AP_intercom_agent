@@ -53,7 +53,7 @@ func TestCameraRTSP(t *testing.T) {
 		}
 	}()
 	// Reserve independent ephemeral ports before starting the subprocess.
-	ports := make([]string, 2)
+	ports := make([]string, 3)
 	for i := range ports {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -66,7 +66,12 @@ func TestCameraRTSP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := strings.NewReplacer("127.0.0.1:1984", ports[0], "127.0.0.1:8554", ports[1], "http://127.0.0.1:18080", baseURL).Replace(string(config))
+	s := strings.NewReplacer(
+		"127.0.0.1:1984", ports[0],
+		"127.0.0.1:8554", ports[1],
+		":8555", ports[2],
+		"http://127.0.0.1:18080", baseURL,
+	).Replace(string(config))
 	path := filepath.Join(t.TempDir(), "go2rtc.yaml")
 	if err := os.WriteFile(path, []byte(s), 0600); err != nil {
 		t.Fatal(err)
@@ -102,6 +107,14 @@ func TestCameraRTSP(t *testing.T) {
 	}
 	wait("RTSP listener", func() bool {
 		c, err := net.DialTimeout("tcp", ports[1], 100*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		c.Close()
+		return true
+	})
+	wait("WebRTC listener", func() bool {
+		c, err := net.DialTimeout("tcp", ports[2], 100*time.Millisecond)
 		if err != nil {
 			return false
 		}
