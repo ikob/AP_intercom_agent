@@ -29,7 +29,7 @@
 
   "incoming_jpeg_dir": "",
   "incoming_jpeg_hold": "5s",
-  "incoming_jpeg_interval": "1s",
+  "incoming_jpeg_interval": "500ms",
   "incoming_jpeg_max_files": 100,
 
   "message_content_type": "application/intercom.message+xml",

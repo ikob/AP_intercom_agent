@@ -14,15 +14,19 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/emiago/sipgo"
+	"github.com/emiago/sipgo/sip"
 )
 
 type fakeCameraMonitorAgent struct {
-	endpoint *url.URL
-	hub      *FrameHub
-	starts   atomic.Int32
-	stops    atomic.Int32
-	mu       sync.Mutex
-	done     chan struct{}
+	endpoint    *url.URL
+	hub         *FrameHub
+	starts      atomic.Int32
+	audioStarts atomic.Int32
+	stops       atomic.Int32
+	mu          sync.Mutex
+	done        chan struct{}
 }
 
 func (a *fakeCameraMonitorAgent) StartMonitor(context.Context) error {
@@ -30,6 +34,11 @@ func (a *fakeCameraMonitorAgent) StartMonitor(context.Context) error {
 	a.mu.Lock()
 	a.done = make(chan struct{})
 	a.mu.Unlock()
+	return nil
+}
+
+func (a *fakeCameraMonitorAgent) StartMonitorAudio(context.Context) error {
+	a.audioStarts.Add(1)
 	return nil
 }
 
@@ -110,7 +119,44 @@ func TestCameraMonitorControllerOnDemandLifecycle(t *testing.T) {
 	waitForAtomicAtLeast(t, &fake.starts, 2)
 }
 
-func TestCameraMonitorControllerDoesNotRedialAfterRemoteEndUntilNewDemand(t *testing.T) {
+func TestCameraMonitorControllerStartsAudioOnlyForAudioDemand(t *testing.T) {
+	jpegData := testJPEG(t, color.RGBA{R: 0x20, G: 0x40, B: 0x60, A: 0xff})
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "image/jpeg")
+		_, _ = response.Write(jpegData)
+	}))
+	defer server.Close()
+	endpoint, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeCameraMonitorAgent{endpoint: endpoint, hub: NewFrameHub()}
+	ctx, cancel := context.WithCancel(context.Background())
+	controller := newCameraMonitorController(ctx, fake, time.Second, 10*time.Millisecond)
+	t.Cleanup(func() {
+		cancel()
+		<-controller.done
+	})
+
+	releaseVideo := controller.AcquireStream()
+	waitForAtomicAtLeast(t, &fake.starts, 1)
+	time.Sleep(30 * time.Millisecond)
+	if got := fake.audioStarts.Load(); got != 0 {
+		t.Fatalf("video-only demand started audio %d times", got)
+	}
+
+	releaseAudio := controller.AcquireAudioStream()
+	waitForAtomicAtLeast(t, &fake.audioStarts, 1)
+	time.Sleep(30 * time.Millisecond)
+	if got := fake.audioStarts.Load(); got != 1 {
+		t.Fatalf("audio demand started audio %d times, want 1", got)
+	}
+	releaseAudio()
+	releaseVideo()
+}
+
+func TestCameraMonitorControllerRedialsAfterRemoteEndWhileDemandRemains(t *testing.T) {
 	jpegData := testJPEG(t, color.RGBA{R: 0x20, G: 0x40, B: 0x60, A: 0xff})
 	var requests atomic.Int32
 	jpegServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
@@ -128,6 +174,8 @@ func TestCameraMonitorControllerDoesNotRedialAfterRemoteEndUntilNewDemand(t *tes
 	fake := &fakeCameraMonitorAgent{endpoint: endpoint, hub: hub}
 	ctx, cancel := context.WithCancel(context.Background())
 	controller := newCameraMonitorController(ctx, fake, 50*time.Millisecond, 10*time.Millisecond)
+	controller.retryBase = 10 * time.Millisecond
+	controller.retryMax = 40 * time.Millisecond
 	t.Cleanup(func() {
 		cancel()
 		<-controller.done
@@ -139,28 +187,76 @@ func TestCameraMonitorControllerDoesNotRedialAfterRemoteEndUntilNewDemand(t *tes
 	waitForFrameSHA256(t, hub, sha256.Sum256(jpegData))
 	fake.endMonitorFromRemote()
 	waitForAtomicAtLeast(t, &fake.stops, 1)
-
-	time.Sleep(cameraMonitorRetryInterval + 100*time.Millisecond)
-	if got := fake.starts.Load(); got != 1 {
-		t.Fatalf("remote end restarted monitor %d times, want 1", got)
-	}
-	placeholder, ok := hub.Snapshot()
-	wantPlaceholder, placeholderErr := newCameraPlaceholderFrame()
-	if placeholderErr != nil {
-		t.Fatal(placeholderErr)
-	}
-	if !ok || placeholder.SHA256 != wantPlaceholder.SHA256 {
-		t.Fatal("remote end did not replace the live frame with a placeholder")
-	}
+	waitForAtomicAtLeast(t, &fake.starts, 2)
 
 	release()
 	time.Sleep(2 * 50 * time.Millisecond)
-	if got := fake.starts.Load(); got != 1 {
-		t.Fatalf("released demand restarted monitor %d times, want 1", got)
+	startsAfterRelease := fake.starts.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := fake.starts.Load(); got != startsAfterRelease {
+		t.Fatalf("released demand restarted monitor: starts changed from %d to %d", startsAfterRelease, got)
+	}
+}
+
+func TestCameraMonitorRetryBackoffForRemoteEndAnd603(t *testing.T) {
+	base := 3 * time.Second
+	maximum := 10 * time.Second
+	for _, test := range []struct {
+		failures int
+		want     time.Duration
+	}{
+		{failures: 1, want: 3 * time.Second},
+		{failures: 2, want: 6 * time.Second},
+		{failures: 3, want: 10 * time.Second},
+		{failures: 4, want: 10 * time.Second},
+	} {
+		if got := cameraMonitorRetryDelay(test.failures, base, maximum); got != test.want {
+			t.Fatalf("retry delay for failure %d = %s, want %s", test.failures, got, test.want)
+		}
 	}
 
-	releaseAgain := controller.AcquireStream()
-	defer releaseAgain()
+	if !cameraMonitorNeedsBackoff(errCameraMonitorEndedByRemote) {
+		t.Fatal("remote monitor end does not enable backoff")
+	}
+	declined := &sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 603}}
+	if !cameraMonitorNeedsBackoff(declined) {
+		t.Fatal("603 response does not enable backoff")
+	}
+	if cameraMonitorNeedsBackoff(context.DeadlineExceeded) {
+		t.Fatal("generic error unexpectedly enables backoff")
+	}
+}
+
+func TestCameraMonitorControllerSuspendsAndResumesExistingDemand(t *testing.T) {
+	jpegData := testJPEG(t, color.RGBA{R: 0x10, G: 0x30, B: 0x50, A: 0xff})
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "image/jpeg")
+		_, _ = response.Write(jpegData)
+	}))
+	defer server.Close()
+	endpoint, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeCameraMonitorAgent{endpoint: endpoint, hub: NewFrameHub()}
+	ctx, cancel := context.WithCancel(context.Background())
+	controller := newCameraMonitorController(ctx, fake, time.Second, 10*time.Millisecond)
+	t.Cleanup(func() {
+		cancel()
+		<-controller.done
+	})
+
+	release := controller.AcquireStream()
+	defer release()
+	waitForAtomicAtLeast(t, &fake.starts, 1)
+	controller.Suspend()
+	waitForAtomicAtLeast(t, &fake.stops, 1)
+	time.Sleep(50 * time.Millisecond)
+	if got := fake.starts.Load(); got != 1 {
+		t.Fatalf("suspended controller restarted monitor %d times", got)
+	}
+	controller.Resume()
 	waitForAtomicAtLeast(t, &fake.starts, 2)
 }
 

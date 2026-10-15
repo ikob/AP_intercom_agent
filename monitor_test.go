@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emiago/diago"
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
 )
@@ -52,6 +53,68 @@ func TestBuildMonitorOffer(t *testing.T) {
 	}
 	if strings.Contains(got, "a=ptime:") || strings.Contains(got, "a=maxptime:") {
 		t.Fatalf("offer contains Diago-only timing attributes:\n%s", got)
+	}
+}
+
+func TestMonitorTalkingMessageMatchesCapturedProtocol(t *testing.T) {
+	if got := len(monitorTalkingBody); got != 233 {
+		t.Fatalf("talking MESSAGE body length = %d, want 233", got)
+	}
+	for _, want := range []string{
+		`<?xml version="1.0" encoding="UTF-8" ?>`,
+		`<IFBOX version = "1.0">`,
+		`<USER_COMM  state = "request"  type = "talking">CONNECT</USER_COMM>`,
+	} {
+		if !strings.Contains(monitorTalkingBody, want) {
+			t.Fatalf("talking MESSAGE body does not contain %q", want)
+		}
+	}
+}
+
+func TestStartMonitorAudioSendsTalkingMessageOncePerDialog(t *testing.T) {
+	request := sip.NewRequest(sip.INVITE, sip.Uri{Scheme: "sip", User: "monitor", Host: "127.0.0.1"})
+	request.AppendHeader(sip.NewHeader("Call-ID", "monitor-audio-test"))
+	request.AppendHeader(sip.NewHeader("CSeq", "1 INVITE"))
+	sipDialog := &sipgo.DialogClientSession{}
+	sipDialog.InviteRequest = request
+	sipDialog.Init()
+	dialog := &diago.DialogClientSession{DialogClientSession: sipDialog}
+
+	fake := &fakeClient{doFn: func(_ context.Context, req *sip.Request) (*sip.Response, error) {
+		return sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil), nil
+	}}
+	agent := &Agent{
+		cfg: Config{
+			Username:      "cellphone0",
+			ContactHost:   "127.0.0.1",
+			ContactPort:   15060,
+			ContactParams: ";+l.operator.docomo.intercom",
+		},
+		monitorRecipient: sip.Uri{Scheme: "sip", User: "monitor", Host: "127.0.0.1"},
+		cli:              fake,
+		monitorState:     monitorConfirmed,
+		monitorDialog:    dialog,
+		audioHub:         NewAudioHub(),
+	}
+
+	if err := agent.StartMonitorAudio(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.StartMonitorAudio(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(fake.doCalls); got != 1 {
+		t.Fatalf("MESSAGE calls = %d, want 1", got)
+	}
+	sent := fake.doCalls[0]
+	if sent.Recipient.User != "monitor" {
+		t.Fatalf("MESSAGE recipient = %s", sent.Recipient.String())
+	}
+	if header := sent.GetHeader("Content-Type"); header == nil || header.Value() != monitorTalkingContentType {
+		t.Fatalf("Content-Type = %v", header)
+	}
+	if got := string(sent.Body()); got != monitorTalkingBody {
+		t.Fatalf("MESSAGE body mismatch:\n%s", got)
 	}
 }
 

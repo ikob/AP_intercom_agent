@@ -27,11 +27,40 @@ const (
 // dialog. The configured URL is the authentication secret; it is deliberately
 // not included in the payload or logs.
 type RingWebhookEvent struct {
-	Type     string    `json:"type"`
-	At       time.Time `json:"at"`
-	Caller   string    `json:"caller,omitempty"`
-	CallID   string    `json:"call_id,omitempty"`
-	DialogID string    `json:"dialog_id,omitempty"`
+	Type          string    `json:"type"`
+	At            time.Time `json:"at"`
+	Caller        string    `json:"caller,omitempty"`
+	CallID        string    `json:"call_id,omitempty"`
+	DialogID      string    `json:"dialog_id,omitempty"`
+	SessionID     string    `json:"session_id,omitempty"`
+	State         CallState `json:"state,omitempty"`
+	PreviousState CallState `json:"previous_state,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+}
+
+// notifyCallStateWebhook publishes transitions on the same authenticated Home
+// Assistant webhook as ring events. Consumers must route on the type field.
+func (a *Agent) notifyCallStateWebhook(ctx context.Context, previous CallState, snapshot CallSnapshot) bool {
+	if a == nil || strings.TrimSpace(a.cfg.RingWebhookURL) == "" {
+		return false
+	}
+	at := time.Now()
+	if snapshot.UpdatedAt != nil {
+		at = *snapshot.UpdatedAt
+	}
+	event := RingWebhookEvent{
+		Type:          "call_state",
+		At:            at,
+		Caller:        snapshot.Caller,
+		CallID:        snapshot.CallID,
+		DialogID:      snapshot.DialogID,
+		SessionID:     snapshot.SessionID,
+		State:         snapshot.State,
+		PreviousState: previous,
+		Reason:        snapshot.Reason,
+	}
+	a.scheduleWebhook(ctx, event)
+	return true
 }
 
 var ringWebhookHTTPClient = &http.Client{
@@ -107,23 +136,41 @@ func (a *Agent) notifyRingWebhook(ctx context.Context, inDialog *diago.DialogSer
 		CallID:   callID,
 		DialogID: dialogID,
 	}
+	a.scheduleWebhook(ctx, event)
+	return true
+}
+
+// scheduleWebhook keeps ring and state transitions ordered without blocking
+// SIP handling on Home Assistant network I/O.
+func (a *Agent) scheduleWebhook(ctx context.Context, event RingWebhookEvent) {
+	done := make(chan struct{})
+	a.webhookOrderMu.Lock()
+	previous := a.webhookTail
+	a.webhookTail = done
+	a.webhookOrderMu.Unlock()
+
 	go func() {
+		defer close(done)
+		if previous != nil {
+			<-previous
+		}
 		if err := postRingWebhook(ctx, a.cfg.RingWebhookURL, event); err != nil {
-			slog.Warn("Ring webhook failed",
-				"caller", caller,
-				"call_id", callID,
-				"dialog_id", dialogID,
+			slog.Warn("Intercom webhook failed",
+				"type", event.Type,
+				"session_id", event.SessionID,
+				"call_id", event.CallID,
+				"state", event.State,
 				"error", err,
 			)
 			return
 		}
-		slog.Info("Ring webhook sent",
-			"caller", caller,
-			"call_id", callID,
-			"dialog_id", dialogID,
+		slog.Info("Intercom webhook sent",
+			"type", event.Type,
+			"session_id", event.SessionID,
+			"call_id", event.CallID,
+			"state", event.State,
 		)
 	}()
-	return true
 }
 
 func postRingWebhook(ctx context.Context, webhookURL string, event RingWebhookEvent) error {

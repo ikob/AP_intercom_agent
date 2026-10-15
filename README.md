@@ -112,7 +112,7 @@ go run . -config /path/to/config.json \
   -send-messages=false \
   -incoming-jpeg-dir /tmp/aiphone-rings \
   -incoming-jpeg-hold 5s \
-  -incoming-jpeg-interval 1s \
+  -incoming-jpeg-interval 500ms \
   -incoming-jpeg-max-files 100 \
   -reject-code 486 \
   -reject-reason "Busy Here"
@@ -122,9 +122,9 @@ The runtime `capture_images` state controls JPEG capture and requires a
 configured `incoming_jpeg_dir`. The runtime `send_messages` state controls
 automatic unlock, and its value at startup also gates the initial generic
 MESSAGE. `unlock_callers` is a second, caller-specific safety allow-list for the
-unlock MESSAGE. The agent snapshots the capture and automatic-unlock states
-independently when each allowed ring arrives, so a state change during a call
-affects only later calls.
+unlock MESSAGE. Enabling `send_messages` during an eligible active call sends
+the unlock MESSAGE once for that call. Repeated updates cannot duplicate it;
+a later call gets its own independent attempt.
 
 New flag-based configurations default to image capture ON and automatic unlock
 OFF. For compatibility, a legacy JSON configuration that explicitly contains
@@ -133,20 +133,22 @@ for image capture at startup. Once explicitly configured, `capture_images` and
 `send_messages` are independent. HTTP `POST /v1/state` is a partial update:
 omitted fields retain their current values.
 
-`answer_calls` remains independent. When it is true, the agent answers after
-JPEG capture, waits approximately one second, and sends BYE. When it is false,
-the agent sends the configured final rejection instead, and the caller may
-display Busy or congestion.
+`answer_calls` remains independent. When it is true, the legacy automatic mode
+answers the call, waits approximately one second, and sends BYE. When it is
+false, the call remains available for manual answer or rejection through the
+HTTP call-control API. An unanswered call is rejected after 30 seconds, and the
+caller may display Busy or congestion.
 
 For each qualifying call, the agent sends a reliable `183 Session Progress`
 with the audio and HTTP/JPEG SDP. If automatic unlock is independently enabled,
 it immediately sends the unlock MESSAGE only when the caller is in
 `unlock_callers`. It accepts the IFBOX-specific PRACK and
-begins HTTP polling after replying `200 OK` to PRACK. Polling stops before the
-final response. It then either answers and sends BYE (`answer_calls=true`) or
-sends the configured rejection (`answer_calls=false`). If capture setup fails
-before `183` while the application and dialog remain active, an eligible caller
-is still unlocked.
+begins HTTP polling after replying `200 OK` to PRACK. JPEG polling runs
+independently from call control and continues through ringing and a manual
+answer until the call ends. `incoming_jpeg_hold` controls how long the saved
+timestamped file is refreshed; later frames update the live camera without
+rewriting that file. If capture setup fails before `183` while the application
+and dialog remain active, an eligible caller is still unlocked.
 
 One timestamped file is retained per ring, for example
 `20261004T214123.123456789+0900_interphone0.jpg`. Frames received during that
@@ -175,11 +177,11 @@ archives.
 
 Set `AP_INTERCOM_RING_WEBHOOK_URL`, `ring_webhook_url` in JSON, or
 `--ring-webhook-url` to a Home Assistant webhook URL. The environment variable
-avoids exposing the secret URL in a process list. The agent sends one JSON
-`POST` when it accepts a new SIP `INVITE` from an allowed caller. This
-notification is independent of `answer_calls`, `capture_images`, and
-`send_messages`. SIP retransmissions with the same Call-ID do not send
-duplicate notifications.
+avoids exposing the secret URL in a process list. The agent sends typed JSON
+`POST` requests when it accepts a new SIP `INVITE` from an allowed caller and
+whenever that call changes state. Ring notification is independent of
+`answer_calls`, `capture_images`, and `send_messages`. SIP retransmissions with
+the same Call-ID do not send duplicate ring notifications.
 
 ```json
 {
@@ -190,6 +192,25 @@ duplicate notifications.
   "dialog_id": "..."
 }
 ```
+
+State transitions use the same webhook URL and are delivered in order:
+
+```json
+{
+  "type": "call_state",
+  "at": "2026-10-15T12:34:57+09:00",
+  "state": "connected",
+  "previous_state": "answering",
+  "session_id": "...",
+  "caller": "interphone1",
+  "call_id": "...",
+  "dialog_id": "..."
+}
+```
+
+The call states are `ringing`, `answering`, `connected`, `ending`, and `idle`.
+The final `idle` event includes a `reason`, such as `local_hangup`,
+`remote_bye`, `remote_cancel`, or `ring_timeout`.
 
 The webhook is optional. Delivery runs asynchronously so an unavailable Home
 Assistant instance cannot delay SIP call handling. The agent does not retry a
@@ -218,6 +239,9 @@ template:
         allowed_methods:
           - POST
         local_only: true
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.json.type == 'ring' }}"
     event:
       - name: "AIPHONE Intercom Doorbell"
         unique_id: aiphone_intercom_doorbell
@@ -230,7 +254,26 @@ For example, if Home Assistant is reachable locally at port 8123, configure
 the agent with
 `http://127.0.0.1:8123/api/webhook/REPLACE_WITH_A_LONG_RANDOM_VALUE`.
 The resulting `event.aiphone_intercom_doorbell` entity reports the standard
-`ring` event type.
+`ring` event type. The condition is required because call-state transitions use
+the same webhook and must not create additional doorbell rings.
+
+## Incoming call control HTTP
+
+The local HTTP control plane exposes the current incoming call separately from
+the existing runtime switches:
+
+- `GET /v1/call` returns the call state and `monitor_active`. An active call
+  also includes `session_id`, caller, Call-ID, dialog ID, and timestamps.
+- `POST /v1/call/answer` with `{"session_id":"..."}` starts the SIP 200/ACK
+  answer sequence.
+- `POST /v1/call/hangup` with `{"session_id":"..."}` rejects a ringing call
+  or sends BYE for a connected call.
+
+Action requests return `202 Accepted`; completion is reported by `GET
+/v1/call` and `call_state` webhook events. The current `session_id` is required
+so a delayed Home Assistant action cannot answer or terminate a later call.
+`answer_calls=false` disables only legacy automatic answer and does not disable
+these manual actions.
 
 ## On-demand live camera HTTP
 
@@ -241,7 +284,13 @@ HTTP/JPEG polling; concurrent viewers reuse it:
 - `GET /v1/camera.jpg` returns the latest JPEG and extends the monitor's idle
   lease. A valid black 640x480 placeholder is available during SIP setup.
 - `GET /v1/camera.mjpeg` returns a `multipart/x-mixed-replace` MJPEG stream.
-  The monitor remains active while at least one stream is connected.
+  The latest frame is emitted at a steady 2 fps, including while SIP switches
+  between monitoring and an incoming call. The monitor remains active while at
+  least one stream is connected.
+- `GET /v1/audio.pcmu` returns raw G.711 PCMU audio (8 kHz, mono, 20 ms
+  frames). Connecting this endpoint holds the same monitor lease and sends the
+  IFBOX `TALKING CONNECT` command once for that SIP dialog. PCMU silence is
+  emitted while RTP is absent so downstream FFmpeg remains connected.
 
 When the last stream closes and no snapshot has been requested for 15 seconds,
 the agent sends BYE. A later request creates a new dialog. `HEAD` requests do
@@ -249,18 +298,28 @@ not start or extend a monitor session. The monitor target defaults to
 `sip:monitor@<proxy host>`; `monitor_uri` or `-monitor-uri` can override it.
 Validated incoming-ring frames are published to the same source.
 
+An incoming call has priority over the outgoing monitor dialog. The agent
+cancels a monitor still being established or sends BYE to a confirmed monitor
+before progressing the incoming call. Existing HTTP camera demand is preserved;
+after the incoming call ends, monitoring resumes without requiring the viewer
+to reconnect. If the IFBOX temporarily returns `603 Decline` while releasing
+the incoming dialog, retries use a bounded backoff instead of redialing every
+second.
+
 For example:
 
 ```bash
 curl --fail http://127.0.0.1:18080/v1/camera.jpg --output /tmp/aiphone.jpg
 ffplay http://127.0.0.1:18080/v1/camera.mjpeg
+ffplay -f mulaw -ar 8000 -ac 1 http://127.0.0.1:18080/v1/audio.pcmu
 ```
 
 ### Home Assistant camera
 
 Use **Generic Camera** with the optional go2rtc sidecar. The pipeline is
-JPEG → HTTP MJPEG → FFmpeg H.264 → go2rtc RTSP. Live monitoring defaults to
-two JPEG frames per second; the MJPEG transport does not recompress them.
+JPEG → HTTP MJPEG → FFmpeg H.264 plus SIP/RTP PCMU → FFmpeg Opus → go2rtc
+RTSP. Live monitoring defaults to two JPEG frames per second; the MJPEG
+transport does not recompress them.
 
 Install [go2rtc](https://github.com/AlexxIT/go2rtc/releases) and FFmpeg with
 `libx264` on the same host as the agent, then run:
@@ -269,19 +328,10 @@ Install [go2rtc](https://github.com/AlexxIT/go2rtc/releases) and FFmpeg with
 go2rtc -config go2rtc.yaml
 ```
 
-The checked-in configuration keeps its API and RTSP listeners on loopback for
-processes sharing one host network. It exposes
-`rtsp://127.0.0.1:8554/intercom`; the Go agent continues to serve HTTP on port
-18080. WebRTC media listens on TCP and UDP port 8555 so browsers can connect
-directly. The sidecar is a separate process and must be started/supervised
-separately. No change to the SIP agent flags is needed.
-
-Home Assistant's **WebRTC Camera** custom integration can connect to the
-existing go2rtc server at `http://127.0.0.1:1984/`. Use `intercom` as the card's
-stream URL and select WebRTC mode. Port 1984 remains local; only encrypted
-WebRTC media on port 8555 is reachable from the LAN. The default go2rtc STUN
-configuration is sufficient for initial testing and is not part of the media
-path.
+The checked-in configuration uses loopback and is intended for processes sharing
+one host network. It exposes `rtsp://127.0.0.1:8554/intercom`; the Go agent
+continues to serve HTTP on port 18080. The sidecar is a separate process and
+must be started/supervised separately. No change to the SIP agent flags is needed.
 
 In Home Assistant's **Generic Camera** integration, configure:
 
@@ -319,10 +369,10 @@ go2rtc 1.9.14. To inspect playback:
 ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/intercom
 ```
 
-An opt-in integration test exercises the actual MJPEG handler with synthetic
-640x480 JPEGs, two-frame-per-second packet timestamps and durations, concurrent RTSP
-viewers, disconnect cleanup, and restart. It does
-not connect to the intercom:
+An opt-in integration test exercises the actual MJPEG and PCMU handlers with
+synthetic 640x480 JPEGs, H.264 two-frame-per-second packet timing, the
+Opus/48 kHz audio track, concurrent RTSP viewers, disconnect cleanup, and
+restart. It does not connect to the intercom:
 
 ```bash
 GO2RTC_BIN=/path/to/go2rtc go test -run TestCameraRTSP -v .
@@ -333,18 +383,25 @@ The existing **MJPEG IP Camera** integration remains usable with
 also accepts the snapshot URL alone, but the raw MJPEG URL is not the H.264
 stream source supplied by this setup.
 
-RTSP and WebRTC output do not implement a Matter accessory. Future Matter
-camera support still requires a Matter implementation; this H.264 stage
-provides a reusable video source.
+RTSP output does not implement a Matter accessory. Future Matter camera support
+requires a Matter implementation and WebRTC session handling; this H.264 stage
+provides a reusable video source. WebRTC listening is disabled in the standalone
+configuration until that separate integration is configured.
 
-The HTTP camera is video-only. The SIP offer includes the IFBOX-compatible
-audio description, but the agent does not transmit RTP or expose audio through
-these endpoints. Together with the optional webhook it provides a camera and
-standard doorbell event entity, but it is not yet a complete Home Assistant
-intercom: it does not provide audio, two-way talk, or native WebRTC. On-demand
-monitoring has been verified with real hardware;
-publishing incoming-ring frames to the live MJPEG source is implemented and
-covered by protocol tests, but still requires end-to-end hardware validation.
+The RTSP source now includes received intercom audio. For outgoing monitoring,
+the audio connection sends the same `TALKING CONNECT` MESSAGE used by the
+official app and relays received PCMU RTP. Incoming-call RTP is published to
+the same stream after the call media socket is allocated. The receive and SIP
+media layers are separated so a future microphone backchannel can write to the
+same dialog without replacing this path; microphone transmission is not yet
+implemented. Together with the optional webhook this provides a camera,
+receive audio, and a standard doorbell event entity, but it is not yet a
+complete Home Assistant intercom because two-way talk remains missing.
+On-demand monitoring and publishing incoming-ring frames to the live source have
+been verified with real hardware and are covered by protocol tests. The
+receive-audio path has also been verified through authenticated
+`TALKING CONNECT`, received PCMU RTP, and the combined H.264/Opus RTSP output;
+audio playback through the Home Assistant client has been verified as well.
 The latest real frame remains available between monitor sessions and is
 refreshed after the next camera request.
 

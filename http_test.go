@@ -30,7 +30,7 @@ func startHTTPTestServer(t *testing.T) (string, context.CancelFunc, *Agent, *Con
 	ctx, cancel := context.WithCancel(context.Background())
 	addr := freeTCPAddr(t)
 
-	agent := &Agent{frameHub: NewFrameHub()}
+	agent := &Agent{frameHub: NewFrameHub(), audioHub: NewAudioHub()}
 	agent.answerEnabled.Store(true)
 	agent.messageEnabled.Store(false)
 	agent.captureEnabled.Store(true)
@@ -180,5 +180,104 @@ func TestHTTPStateAndMessages(t *testing.T) {
 	}
 	if len(msgs) != 1 || msgs[0].CallID != "id-1" {
 		t.Fatalf("unexpected messages: %+v", msgs)
+	}
+}
+
+func TestHTTPCallStateAndActionsRequireCurrentSession(t *testing.T) {
+	baseURL, cancel, agent, _, _ := startHTTPTestServer(t)
+	defer cancel()
+
+	session := &incomingCallSession{
+		sessionID: "session-current",
+		commands:  make(chan incomingCallCommand, 2),
+	}
+	agent.callMu.Lock()
+	agent.activeCall = session
+	agent.callSnapshot = CallSnapshot{
+		State:     CallStateRinging,
+		SessionID: session.sessionID,
+		Caller:    "interphone0",
+	}
+	agent.callMu.Unlock()
+
+	response, err := http.Get(baseURL + "/v1/call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var snapshot CallSnapshot
+	if err := json.NewDecoder(response.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.State != CallStateRinging || snapshot.SessionID != session.sessionID {
+		t.Fatalf("unexpected call snapshot: %+v", snapshot)
+	}
+
+	response, err = http.Post(baseURL+"/v1/call/answer", "application/json", bytes.NewBufferString(`{"session_id":"stale"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("stale answer status = %d, want 409", response.StatusCode)
+	}
+
+	response, err = http.Post(baseURL+"/v1/call/answer", "application/json", bytes.NewBufferString(`{"session_id":"session-current"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("answer status = %d, want 202", response.StatusCode)
+	}
+	select {
+	case command := <-session.commands:
+		if command != incomingCallAnswer {
+			t.Fatalf("command = %v, want answer", command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("answer command was not queued")
+	}
+
+	agent.callMu.Lock()
+	agent.callSnapshot.State = CallStateConnected
+	agent.callMu.Unlock()
+	response, err = http.Post(baseURL+"/v1/call/hangup", "application/json", bytes.NewBufferString(`{"session_id":"session-current"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("hangup status = %d, want 202", response.StatusCode)
+	}
+	select {
+	case command := <-session.commands:
+		if command != incomingCallHangup {
+			t.Fatalf("command = %v, want hangup", command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hangup command was not queued")
+	}
+}
+
+func TestHTTPCallIdleSnapshotOmitsActiveMetadata(t *testing.T) {
+	baseURL, cancel, _, _, _ := startHTTPTestServer(t)
+	defer cancel()
+	response, err := http.Get(baseURL + "/v1/call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["state"] != string(CallStateIdle) || payload["monitor_active"] != false {
+		t.Fatalf("unexpected idle snapshot: %#v", payload)
+	}
+	for _, key := range []string{"session_id", "caller", "call_id", "dialog_id", "started_at"} {
+		if _, exists := payload[key]; exists {
+			t.Fatalf("idle snapshot unexpectedly contains %s: %#v", key, payload)
+		}
 	}
 }

@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -38,6 +39,7 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 			defaultCameraMonitorIdleTimeout,
 			agent.cfg.MonitorJPEGInterval.Duration,
 		)
+		agent.cameraMonitor = h.camera
 	}
 
 	mux := http.NewServeMux()
@@ -145,6 +147,17 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 		}
 	})
 
+	mux.HandleFunc("/v1/call", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(agent.currentCallSnapshot())
+	})
+	mux.HandleFunc("/v1/call/answer", h.callActionHandler(incomingCallAnswer))
+	mux.HandleFunc("/v1/call/hangup", h.callActionHandler(incomingCallHangup))
+
 	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -155,6 +168,7 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 	})
 	mux.HandleFunc("/v1/camera.jpg", h.handleCameraSnapshot)
 	mux.HandleFunc("/v1/camera.mjpeg", h.handleCameraMJPEG)
+	mux.HandleFunc("/v1/audio.pcmu", h.handleAudioPCMU)
 
 	h.srv = &http.Server{
 		Addr:              listen,
@@ -180,6 +194,37 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 	}()
 
 	return h
+}
+
+func (h *HTTPServer) callActionHandler(command incomingCallCommand) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var request struct {
+			SessionID string `json:"session_id"`
+		}
+		decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+		if err := decoder.Decode(&request); err != nil || request.SessionID == "" {
+			http.Error(w, "session_id is required", http.StatusBadRequest)
+			return
+		}
+		if err := h.agent.enqueueIncomingCallCommand(request.SessionID, command); err != nil {
+			status := http.StatusConflict
+			if errors.Is(err, errNoActiveCall) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"accepted": true,
+			"call":     h.agent.currentCallSnapshot(),
+		})
+	}
 }
 
 func (h *HTTPServer) WaitCameraStopped(ctx context.Context) error {

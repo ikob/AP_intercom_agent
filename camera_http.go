@@ -8,9 +8,13 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 )
 
-const cameraMJPEGBoundary = "ap_intercom_agent_frame"
+const (
+	cameraMJPEGBoundary      = "ap_intercom_agent_frame"
+	cameraMJPEGFrameInterval = 500 * time.Millisecond
+)
 
 func (h *HTTPServer) handleCameraSnapshot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -71,32 +75,46 @@ func (h *HTTPServer) handleCameraMJPEG(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
+	ticker := time.NewTicker(cameraMJPEGFrameInterval)
+	defer ticker.Stop()
+	var latest monitorJPEGFrame
+	haveFrame := false
 	for {
 		select {
 		case frame, open := <-subscription.Frames():
 			if !open {
 				return
 			}
-			if _, err := fmt.Fprintf(
-				w,
-				"--%s\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\nX-Frame-SHA256: %x\r\n\r\n",
-				cameraMJPEGBoundary,
-				len(frame.Data),
-				frame.SHA256,
-			); err != nil {
+			latest = frame
+			haveFrame = true
+		case <-ticker.C:
+			if haveFrame && !writeCameraMJPEGFrame(w, flusher, latest) {
 				return
 			}
-			if _, err := w.Write(frame.Data); err != nil {
-				return
-			}
-			if _, err := io.WriteString(w, "\r\n"); err != nil {
-				return
-			}
-			flusher.Flush()
 		case <-r.Context().Done():
 			return
 		}
 	}
+}
+
+func writeCameraMJPEGFrame(w io.Writer, flusher http.Flusher, frame monitorJPEGFrame) bool {
+	if _, err := fmt.Fprintf(
+		w,
+		"--%s\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\nX-Frame-SHA256: %x\r\n\r\n",
+		cameraMJPEGBoundary,
+		len(frame.Data),
+		frame.SHA256,
+	); err != nil {
+		return false
+	}
+	if _, err := w.Write(frame.Data); err != nil {
+		return false
+	}
+	if _, err := io.WriteString(w, "\r\n"); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
 }
 
 func cameraUnavailable(w http.ResponseWriter) {

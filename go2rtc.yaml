@@ -1,21 +1,25 @@
 # Run alongside the agent: go2rtc -config go2rtc.yaml
-# API and RTSP stay on loopback because the agent, go2rtc and HA share the
-# host network. WebRTC media must be reachable directly from browser clients.
+# Loopback defaults assume the agent, go2rtc and HA share the host network.
 api:
   listen: "127.0.0.1:1984"
 rtsp:
   listen: "127.0.0.1:8554"
 webrtc:
-  listen: ":8555"
+  listen: ""
 
 streams:
   intercom:
     - "ffmpeg:http://127.0.0.1:18080/v1/camera.mjpeg#input=intercom_mjpeg#video=h264"
+    - "ffmpeg:http://127.0.0.1:18080/v1/audio.pcmu#input=intercom_pcmu#audio=opus"
 
 ffmpeg:
   # Avoid multi-second probing and the demuxer's assumed 25 fps timestamps.
   # Wallclock timestamps preserve the arrival cadence of the 2 fps JPEGs.
   intercom_mjpeg: "-flags low_delay -probesize 32 -analyzeduration 0 -f mpjpeg -use_wallclock_as_timestamps 1 -i {input}"
+  # IFBOX audio is G.711 PCMU, 8 kHz, mono. This input is deliberately kept
+  # separate from video so a future go2rtc backchannel can feed the SIP RTP
+  # writer without changing the receive pipeline.
+  intercom_pcmu: "-flags low_delay -probesize 32 -analyzeduration 0 -f mulaw -ar 8000 -ac 1 -use_wallclock_as_timestamps 1 -i {input}"
   # Encode every frame as an IDR frame so a viewer can begin decoding at the
   # next 500 ms frame instead of waiting for a longer GOP. The filter normalizes
   # timing but does not synthesize intermediate motion.

@@ -35,25 +35,38 @@ type Agent struct {
 	srv *sipgo.Server
 	tu  *diago.Diago
 
-	answerEnabled  atomic.Bool // controls Answer vs Reject
+	answerEnabled  atomic.Bool // controls legacy automatic answer
 	messageEnabled atomic.Bool // controls MESSAGE sending
 	captureEnabled atomic.Bool // controls incoming-ring JPEG capture
+	callUnlockMu   sync.Mutex
+	callUnlocks    map[*incomingCallUnlock]struct{}
 
 	// Registration loop cancellation so we can stop it before Unregister().
 	regMu     sync.Mutex
 	regCancel context.CancelFunc
 	regDone   chan struct{}
 
-	monitorMu          sync.Mutex
-	monitorState       monitorState
-	monitorDialog      *diago.DialogClientSession
-	prackMu            sync.Mutex
-	prackWaiters       map[string]*inboundPRACKWaiter
-	incomingJPEGMu     sync.Mutex
-	incomingJPEGActive map[string]int
-	frameHub           *FrameHub
-	ringWebhookMu      sync.Mutex
-	ringWebhookSeen    map[string]time.Time
+	monitorMu            sync.Mutex
+	monitorState         monitorState
+	monitorDialog        *diago.DialogClientSession
+	monitorStartCancel   context.CancelFunc
+	monitorLifecycle     chan struct{}
+	monitorTalkingCallID string
+	cameraMonitor        *cameraMonitorController
+	callMu               sync.Mutex
+	activeCall           *incomingCallSession
+	callSnapshot         CallSnapshot
+	incomingCallTimeout  time.Duration
+	prackMu              sync.Mutex
+	prackWaiters         map[string]*inboundPRACKWaiter
+	incomingJPEGMu       sync.Mutex
+	incomingJPEGActive   map[string]int
+	frameHub             *FrameHub
+	audioHub             *AudioHub
+	ringWebhookMu        sync.Mutex
+	ringWebhookSeen      map[string]time.Time
+	webhookOrderMu       sync.Mutex
+	webhookTail          <-chan struct{}
 
 	msgBuf         *MessageBuffer
 	regID          uint64
@@ -103,20 +116,23 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 	srv, _ := sipgo.NewServer(ua)
 
 	a := &Agent{
-		cfg:                cfg,
-		recipient:          recipient,
-		messageRecipient:   messageRecipient,
-		entranceRecipient:  entranceRecipient,
-		monitorRecipient:   monitorRecipient,
-		ua:                 ua,
-		cli:                cli,
-		srv:                srv,
-		regDone:            make(chan struct{}),
-		prackWaiters:       make(map[string]*inboundPRACKWaiter),
-		incomingJPEGActive: make(map[string]int),
-		frameHub:           NewFrameHub(),
-		ringWebhookSeen:    make(map[string]time.Time),
-		msgBuf:             msgBuf,
+		cfg:                 cfg,
+		recipient:           recipient,
+		messageRecipient:    messageRecipient,
+		entranceRecipient:   entranceRecipient,
+		monitorRecipient:    monitorRecipient,
+		ua:                  ua,
+		cli:                 cli,
+		srv:                 srv,
+		regDone:             make(chan struct{}),
+		prackWaiters:        make(map[string]*inboundPRACKWaiter),
+		incomingJPEGActive:  make(map[string]int),
+		frameHub:            NewFrameHub(),
+		audioHub:            NewAudioHub(),
+		ringWebhookSeen:     make(map[string]time.Time),
+		callUnlocks:         make(map[*incomingCallUnlock]struct{}),
+		incomingCallTimeout: defaultIncomingCallTimeout,
+		msgBuf:              msgBuf,
 	}
 	a.srv.OnPrack(a.handleInboundPRACK)
 	a.answerEnabled.Store(cfg.AnswerCalls)
@@ -224,76 +240,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Start INVITE handling.
 	go func() {
 		a.tu.Serve(ctx, func(inDialog *diago.DialogServerSession) {
-			slog.Info("New dialog request", "id", inDialog.ID)
-			defer slog.Info("Dialog finished", "id", inDialog.ID)
-
-			// Always enforce whitelist first.
-			if !a.callerAllowedFromInvite(inDialog) {
-				_ = inDialog.Trying()
-				_ = inDialog.Respond(403, "Forbidden", nil)
-				return
-			}
-			caller := callerFromInvite(inDialog)
-			a.notifyRingWebhook(ctx, inDialog, caller)
-
-			// Snapshot image capture and automatic unlock independently once for
-			// this call. Runtime changes affect only later calls.
-			autoUnlockMode := a.messageEnabled.Load()
-			captureImagesMode := a.captureEnabled.Load()
-			captureIncomingJPEG := a.shouldCaptureIncomingJPEG(captureImagesMode)
-			unlockCaller := a.unlockCallerAllowed(caller)
-			if autoUnlockMode && !unlockCaller {
-				slog.Info("Automatic unlock skipped for caller", "caller", caller)
-			}
-			if captureIncomingJPEG {
-				_ = inDialog.Trying()
-				slog.Info("Trying", "id", inDialog.ID)
-			}
-
-			var unlockOnce sync.Once
-			sendUnlock := func() {
-				if !autoUnlockMode || !unlockCaller {
-					return
-				}
-				unlockOnce.Do(func() {
-					if err := a.sendMessage(inDialog.Context(), a.entranceRecipient, a.cfg.EntranceContentType, []byte(a.cfg.EntranceBody)); err != nil {
-						slog.Error("Failed to send entrance MESSAGE", "error", err)
-					}
-				})
-			}
-			sendUnlockIfActive := func() {
-				runIfContextsActive(sendUnlock, ctx, inDialog.Context())
-			}
-
-			if captureIncomingJPEG {
-				// Put the reliable 183 on the wire before unlocking, then send the
-				// MESSAGE immediately; JPEG polling does not delay the unlock.
-				if err := a.captureIncomingRing(ctx, inDialog, sendUnlockIfActive); err != nil && inDialog.Context().Err() == nil {
-					slog.Error("Failed to capture incoming ring JPEG", "id", inDialog.ID, "error", err)
-				}
-				if inDialog.Context().Err() != nil {
-					return
-				}
-				// Capture setup can fail before the 183 callback. Automatic unlock
-				// must still run in that case, but never after dialog cancellation.
-				sendUnlockIfActive()
-			} else {
-				sendUnlockIfActive()
-			}
-
-			// If we do not answer calls, reject INVITE but keep registration alive.
-			if !a.answerEnabled.Load() {
-				if !captureIncomingJPEG {
-					_ = inDialog.Trying()
-				}
-				_ = inDialog.Respond(a.cfg.RejectStatus, a.cfg.RejectReason, nil)
-				return
-			}
-
-			// Normal mode: answer call and hang up shortly after.
-			if err := a.respondIncomingCall(ctx, inDialog); err != nil {
-				slog.Error("Failed to respond to incoming call", "error", err)
-			}
+			a.handleIncomingDialog(ctx, inDialog)
 		})
 	}()
 
@@ -368,8 +315,13 @@ func (a *Agent) SetEnabled(target *atomic.Bool, enabled bool) {
 	_ = target.Swap(enabled)
 }
 
-func (a *Agent) SetAnswerEnabled(enabled bool)  { a.SetEnabled(&a.answerEnabled, enabled) }
-func (a *Agent) SetMessageEnabled(enabled bool) { a.SetEnabled(&a.messageEnabled, enabled) }
+func (a *Agent) SetAnswerEnabled(enabled bool) { a.SetEnabled(&a.answerEnabled, enabled) }
+func (a *Agent) SetMessageEnabled(enabled bool) {
+	a.SetEnabled(&a.messageEnabled, enabled)
+	if enabled {
+		a.triggerActiveCallUnlocks()
+	}
+}
 func (a *Agent) SetCaptureEnabled(enabled bool) { a.SetEnabled(&a.captureEnabled, enabled) }
 
 func (a *Agent) shouldCaptureIncomingJPEG(captureImages bool) bool {

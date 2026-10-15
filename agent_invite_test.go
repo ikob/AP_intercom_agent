@@ -135,6 +135,7 @@ func TestInviteRejectedWhenAnswerDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	agent.incomingCallTimeout = 50 * time.Millisecond
 
 	agent.registerLoopFn = func(ctx context.Context) error {
 		<-ctx.Done()

@@ -60,8 +60,12 @@ func TestHTTPSnapshotUnavailableUntilFramePublished(t *testing.T) {
 func TestHTTPMJPEGStreamsPublishedFrames(t *testing.T) {
 	baseURL, cancel, agent, _, _ := startHTTPTestServer(t)
 	defer cancel()
+	want := testHubFrame(t, solidColor(0x99, 0x77, 0x55))
+	if err := agent.frameHub.Publish(want); err != nil {
+		t.Fatal(err)
+	}
 
-	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	requestCtx, cancelRequest := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancelRequest()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, baseURL+"/v1/camera.mjpeg", nil)
 	if err != nil {
@@ -84,27 +88,25 @@ func TestHTTPMJPEGStreamsPublishedFrames(t *testing.T) {
 	}
 	reader := multipart.NewReader(response.Body, parameters["boundary"])
 
-	want := testHubFrame(t, solidColor(0x99, 0x77, 0x55))
-	if err := agent.frameHub.Publish(want); err != nil {
-		t.Fatal(err)
-	}
-	part, err := reader.NextPart()
-	if err != nil {
-		t.Fatal(err)
-	}
-	contentLength, err := strconv.Atoi(part.Header.Get("Content-Length"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, contentLength)
-	if _, err := io.ReadFull(part, got); err != nil {
-		t.Fatal(err)
-	}
-	if part.Header.Get("Content-Type") != "image/jpeg" {
-		t.Fatalf("part Content-Type = %q", part.Header.Get("Content-Type"))
-	}
-	if !bytes.Equal(got, want.Data) {
-		t.Fatal("MJPEG part does not match the published frame")
+	for partNumber := 1; partNumber <= 2; partNumber++ {
+		part, err := reader.NextPart()
+		if err != nil {
+			t.Fatalf("read MJPEG part %d: %v", partNumber, err)
+		}
+		contentLength, err := strconv.Atoi(part.Header.Get("Content-Length"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, contentLength)
+		if _, err := io.ReadFull(part, got); err != nil {
+			t.Fatal(err)
+		}
+		if part.Header.Get("Content-Type") != "image/jpeg" {
+			t.Fatalf("part %d Content-Type = %q", partNumber, part.Header.Get("Content-Type"))
+		}
+		if !bytes.Equal(got, want.Data) {
+			t.Fatalf("MJPEG part %d does not match the published frame", partNumber)
+		}
 	}
 }
 

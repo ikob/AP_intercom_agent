@@ -9,7 +9,7 @@
 // - Flags override JSON config.
 // - URI hiding/refactor is postponed (keep register_uri/message_uri/entrance_uri as-is).
 // - Split "enabled" into independent toggles:
-//     * answer_calls: whether to Answer INVITE (otherwise reject)
+//     * answer_calls: whether to auto-answer INVITE (manual HTTP answer remains available)
 //     * send_messages: whether to send MESSAGE (initial/entrance)
 //     * capture_images: whether to capture incoming-ring JPEGs
 //
@@ -186,7 +186,7 @@ func DefaultConfig() Config {
 		MonitorJPEGInterval:  Duration{Duration: time.Second / 2},
 		JPEGQueryS:           defaultJPEGQueryS,
 		IncomingJPEGHold:     Duration{Duration: 5 * time.Second},
-		IncomingJPEGInterval: Duration{Duration: time.Second},
+		IncomingJPEGInterval: Duration{Duration: time.Second / 2},
 		IncomingJPEGMaxFiles: 100,
 		UnlockCallers:        []string{"interphone0"},
 	}
@@ -287,7 +287,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.DurationVar(&cfg.Expiry.Duration, "expiry", cfg.Expiry.Duration, "REGISTER expiry (e.g. 3600s)")
 	fs.DurationVar(&cfg.RetryInterval.Duration, "retry", cfg.RetryInterval.Duration, "REGISTER retry interval (e.g. 60s)")
 
-	fs.BoolVar(&cfg.AnswerCalls, "answer-calls", cfg.AnswerCalls, "Answer incoming INVITE calls")
+	fs.BoolVar(&cfg.AnswerCalls, "answer-calls", cfg.AnswerCalls, "Automatically answer incoming INVITE calls")
 	fs.BoolVar(&cfg.SendMessages, "send-messages", cfg.SendMessages, "Send SIP MESSAGE (initial/entrance)")
 	fs.BoolVar(&cfg.CaptureImages, "capture-images", cfg.CaptureImages, "Capture timestamped JPEGs from incoming rings")
 
@@ -310,7 +310,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.DurationVar(&cfg.MonitorJPEGInterval.Duration, "monitor-jpeg-interval", cfg.MonitorJPEGInterval.Duration, "Minimum interval between monitor JPEG requests")
 	fs.StringVar(&cfg.JPEGQueryS, "jpeg-query-s", cfg.JPEGQueryS, "Value of the IFBOX JPEG HTTP query parameter s")
 	fs.StringVar(&cfg.IncomingJPEGDir, "incoming-jpeg-dir", cfg.IncomingJPEGDir, "Absolute directory for timestamped JPEGs captured from incoming rings")
-	fs.DurationVar(&cfg.IncomingJPEGHold.Duration, "incoming-jpeg-hold", cfg.IncomingJPEGHold.Duration, "How long to poll JPEGs for each incoming ring")
+	fs.DurationVar(&cfg.IncomingJPEGHold.Duration, "incoming-jpeg-hold", cfg.IncomingJPEGHold.Duration, "How long the saved JPEG is updated for each incoming ring; live polling continues for the call")
 	fs.DurationVar(&cfg.IncomingJPEGInterval.Duration, "incoming-jpeg-interval", cfg.IncomingJPEGInterval.Duration, "Minimum interval between incoming-ring JPEG requests")
 	fs.IntVar(&cfg.IncomingJPEGMaxFiles, "incoming-jpeg-max-files", cfg.IncomingJPEGMaxFiles, "Maximum number of timestamped incoming-ring JPEGs retained")
 

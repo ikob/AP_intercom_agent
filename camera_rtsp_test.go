@@ -53,7 +53,7 @@ func TestCameraRTSP(t *testing.T) {
 		}
 	}()
 	// Reserve independent ephemeral ports before starting the subprocess.
-	ports := make([]string, 3)
+	ports := make([]string, 2)
 	for i := range ports {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -66,12 +66,7 @@ func TestCameraRTSP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := strings.NewReplacer(
-		"127.0.0.1:1984", ports[0],
-		"127.0.0.1:8554", ports[1],
-		":8555", ports[2],
-		"http://127.0.0.1:18080", baseURL,
-	).Replace(string(config))
+	s := strings.NewReplacer("127.0.0.1:1984", ports[0], "127.0.0.1:8554", ports[1], "http://127.0.0.1:18080", baseURL).Replace(string(config))
 	path := filepath.Join(t.TempDir(), "go2rtc.yaml")
 	if err := os.WriteFile(path, []byte(s), 0600); err != nil {
 		t.Fatal(err)
@@ -107,14 +102,6 @@ func TestCameraRTSP(t *testing.T) {
 	}
 	wait("RTSP listener", func() bool {
 		c, err := net.DialTimeout("tcp", ports[1], 100*time.Millisecond)
-		if err != nil {
-			return false
-		}
-		c.Close()
-		return true
-	})
-	wait("WebRTC listener", func() bool {
-		c, err := net.DialTimeout("tcp", ports[2], 100*time.Millisecond)
 		if err != nil {
 			return false
 		}
@@ -222,10 +209,34 @@ func TestCameraRTSP(t *testing.T) {
 		t.Fatal("no timestamped packet pairs")
 	}
 	wait("probe lease release", func() bool { return subscribers() == 0 })
+	audioProbeCtx, cancelAudioProbe := context.WithTimeout(ctx, 15*time.Second)
+	audioProbe := exec.CommandContext(audioProbeCtx, "ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-probesize", "1000000", "-analyzeduration", "3000000", "-i", fmt.Sprintf("rtsp://%s/intercom", ports[1]), "-select_streams", "a:0", "-show_entries", "stream=codec_name,sample_rate,channels", "-of", "json")
+	audioDescription, err := audioProbe.Output()
+	cancelAudioProbe()
+	if err != nil {
+		t.Fatalf("probe audio track: %v", err)
+	}
+	var audioStreams struct {
+		Streams []struct {
+			CodecName  string `json:"codec_name"`
+			SampleRate string `json:"sample_rate"`
+			Channels   int    `json:"channels"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(audioDescription, &audioStreams); err != nil {
+		t.Fatal(err)
+	}
+	if len(audioStreams.Streams) != 1 {
+		t.Fatalf("audio streams = %s", audioDescription)
+	}
+	if stream := audioStreams.Streams[0]; stream.CodecName != "opus" || stream.SampleRate != "48000" || stream.Channels < 1 {
+		t.Fatalf("audio stream = %+v, want Opus/48000", stream)
+	}
+	wait("audio probe lease release", func() bool { return subscribers() == 0 })
 	// Decode two frames, then disconnect; repeat to prove on-demand restart.
 	for round := 0; round < 2; round++ {
 		clientCtx, cancelClient := context.WithTimeout(ctx, 20*time.Second)
-		client := exec.CommandContext(clientCtx, "ffmpeg", "-hide_banner", "-v", "error", "-rtsp_transport", "tcp", "-probesize", "32", "-analyzeduration", "0", "-threads", "1", "-flags", "low_delay", "-i", fmt.Sprintf("rtsp://%s/intercom", ports[1]), "-frames:v", "2", "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1")
+		client := exec.CommandContext(clientCtx, "ffmpeg", "-hide_banner", "-v", "error", "-rtsp_transport", "tcp", "-probesize", "32", "-analyzeduration", "0", "-threads", "1", "-flags", "low_delay", "-i", fmt.Sprintf("rtsp://%s/intercom", ports[1]), "-map", "0:v:0", "-an", "-frames:v", "2", "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1")
 		output, err := client.Output()
 		cancelClient()
 		if err != nil {

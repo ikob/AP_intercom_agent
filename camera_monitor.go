@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/emiago/sipgo"
 )
 
 const (
@@ -22,12 +24,16 @@ const (
 	cameraMonitorSetupTimeout       = 10 * time.Second
 	cameraMonitorStopTimeout        = 5 * time.Second
 	cameraMonitorRetryInterval      = time.Second
+	cameraMonitorRetryBase          = 3 * time.Second
+	cameraMonitorRetryMax           = 10 * time.Second
+	cameraMonitorStableSession      = 10 * time.Second
 )
 
 var errCameraMonitorEndedByRemote = errors.New("monitor dialog ended by remote")
 
 type cameraMonitorAgent interface {
 	StartMonitor(context.Context) error
+	StartMonitorAudio(context.Context) error
 	StopMonitor(context.Context) error
 	monitorDone() <-chan struct{}
 	monitorJPEGEndpoint() (*url.URL, error)
@@ -38,16 +44,21 @@ type cameraMonitorAgent interface {
 // monitor dialog. Snapshot requests extend an idle lease; MJPEG requests hold
 // a lease until their HTTP connection closes.
 type cameraMonitorController struct {
-	ctx      context.Context
-	agent    cameraMonitorAgent
-	idle     time.Duration
-	interval time.Duration
+	ctx       context.Context
+	agent     cameraMonitorAgent
+	idle      time.Duration
+	interval  time.Duration
+	retryBase time.Duration
+	retryMax  time.Duration
 
-	mu         sync.Mutex
-	lastDemand time.Time
-	streams    int
-	wake       chan struct{}
-	done       chan struct{}
+	mu                sync.Mutex
+	lastDemand        time.Time
+	streams           int
+	audioStreams      int
+	suspended         bool
+	suspendGeneration uint64
+	wake              chan struct{}
+	done              chan struct{}
 }
 
 func newCameraMonitorController(ctx context.Context, agent cameraMonitorAgent, idle, interval time.Duration) *cameraMonitorController {
@@ -58,12 +69,14 @@ func newCameraMonitorController(ctx context.Context, agent cameraMonitorAgent, i
 		interval = time.Second
 	}
 	m := &cameraMonitorController{
-		ctx:      ctx,
-		agent:    agent,
-		idle:     idle,
-		interval: interval,
-		wake:     make(chan struct{}, 1),
-		done:     make(chan struct{}),
+		ctx:       ctx,
+		agent:     agent,
+		idle:      idle,
+		interval:  interval,
+		retryBase: cameraMonitorRetryBase,
+		retryMax:  cameraMonitorRetryMax,
+		wake:      make(chan struct{}, 1),
+		done:      make(chan struct{}),
 	}
 	if err := m.publishPlaceholder(); err != nil {
 		slog.Warn("Failed to publish camera placeholder", "error", err)
@@ -106,6 +119,42 @@ func (m *cameraMonitorController) AcquireStream() func() {
 	}
 }
 
+// AcquireAudioStream holds the shared SIP monitor exactly like a video stream,
+// while also requesting the IFBOX talking mode that enables RTP audio.
+func (m *cameraMonitorController) AcquireAudioStream() func() {
+	if m == nil {
+		return func() {}
+	}
+	m.mu.Lock()
+	m.streams++
+	m.audioStreams++
+	m.lastDemand = time.Now()
+	m.mu.Unlock()
+	m.signal()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			if m.streams > 0 {
+				m.streams--
+			}
+			if m.audioStreams > 0 {
+				m.audioStreams--
+			}
+			m.lastDemand = time.Now()
+			m.mu.Unlock()
+			m.signal()
+		})
+	}
+}
+
+func (m *cameraMonitorController) audioDemand() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !m.suspended && m.audioStreams > 0
+}
+
 func (m *cameraMonitorController) signal() {
 	select {
 	case m.wake <- struct{}{}:
@@ -113,9 +162,60 @@ func (m *cameraMonitorController) signal() {
 	}
 }
 
+// Suspend preserves HTTP camera demand while preventing an outgoing SIP
+// monitor dialog. Incoming calls use it before preempting the current monitor.
+func (m *cameraMonitorController) Suspend() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	if !m.suspended {
+		m.suspended = true
+		m.suspendGeneration++
+	}
+	m.mu.Unlock()
+	m.signal()
+}
+
+// Resume lets the controller recreate the monitor dialog when the existing
+// snapshot lease or MJPEG viewer still requires it.
+func (m *cameraMonitorController) Resume() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.suspended = false
+	m.mu.Unlock()
+	m.signal()
+}
+
+func (m *cameraMonitorController) Suspended() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.suspended
+}
+
+func (m *cameraMonitorController) preemptionGeneration() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.suspendGeneration
+}
+
+func (m *cameraMonitorController) preemptedSince(generation uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.suspendGeneration != generation
+}
+
 func (m *cameraMonitorController) demand(now time.Time) (active bool, idleRemaining time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.suspended {
+		return false, 0
+	}
 	if m.streams > 0 {
 		return true, m.idle
 	}
@@ -128,29 +228,44 @@ func (m *cameraMonitorController) demand(now time.Time) (active bool, idleRemain
 
 func (m *cameraMonitorController) run() {
 	defer close(m.done)
+	backoffFailures := 0
 	for m.waitForDemand() {
+		sessionStarted := time.Now()
 		err := m.runSession()
 		if m.ctx.Err() != nil {
 			return
 		}
 		if errors.Is(err, errCameraMonitorEndedByRemote) {
+			if m.Suspended() {
+				backoffFailures = 0
+				continue
+			}
 			slog.Info("On-demand camera monitor ended by remote")
 			if placeholderErr := m.publishPlaceholder(); placeholderErr != nil {
 				slog.Warn("Failed to publish camera placeholder", "error", placeholderErr)
 			}
-			if !m.suspendUntilDemandReleased() {
-				return
-			}
-			continue
 		}
 		if err == nil {
+			backoffFailures = 0
 			continue
 		}
-		slog.Warn("On-demand camera monitor stopped", "error", err)
 		if active, _ := m.demand(time.Now()); !active {
+			backoffFailures = 0
 			continue
 		}
-		timer := time.NewTimer(cameraMonitorRetryInterval)
+
+		delay := cameraMonitorRetryInterval
+		if cameraMonitorNeedsBackoff(err) {
+			if time.Since(sessionStarted) >= cameraMonitorStableSession {
+				backoffFailures = 0
+			}
+			backoffFailures++
+			delay = cameraMonitorRetryDelay(backoffFailures, m.retryBase, m.retryMax)
+		} else {
+			backoffFailures = 0
+		}
+		slog.Warn("On-demand camera monitor stopped", "error", err, "retry_in", delay, "backoff_failures", backoffFailures)
+		timer := time.NewTimer(delay)
 		select {
 		case <-timer.C:
 		case <-m.ctx.Done():
@@ -160,25 +275,35 @@ func (m *cameraMonitorController) run() {
 	}
 }
 
-// suspendUntilDemandReleased prevents an IFBOX-terminated monitor from being
-// redialed while the same snapshot lease or MJPEG connection remains active.
-// A later HTTP request starts a fresh monitor session.
-func (m *cameraMonitorController) suspendUntilDemandReleased() bool {
-	for {
-		m.mu.Lock()
-		if m.streams == 0 {
-			m.lastDemand = time.Time{}
-			m.mu.Unlock()
-			return true
-		}
-		m.mu.Unlock()
-
-		select {
-		case <-m.wake:
-		case <-m.ctx.Done():
-			return false
-		}
+func cameraMonitorNeedsBackoff(err error) bool {
+	if errors.Is(err, errCameraMonitorEndedByRemote) {
+		return true
 	}
+	var responseErr *sipgo.ErrDialogResponse
+	return errors.As(err, &responseErr) && responseErr.Res != nil && responseErr.Res.StatusCode == 603
+}
+
+func cameraMonitorRetryDelay(failures int, base, maximum time.Duration) time.Duration {
+	if base <= 0 {
+		base = cameraMonitorRetryBase
+	}
+	if maximum < base {
+		maximum = base
+	}
+	if failures < 1 {
+		failures = 1
+	}
+	delay := base
+	for attempt := 1; attempt < failures; attempt++ {
+		if delay >= maximum/2 {
+			return maximum
+		}
+		delay *= 2
+	}
+	if delay > maximum {
+		return maximum
+	}
+	return delay
 }
 
 func (m *cameraMonitorController) waitForDemand() bool {
@@ -195,6 +320,7 @@ func (m *cameraMonitorController) waitForDemand() bool {
 }
 
 func (m *cameraMonitorController) runSession() (retErr error) {
+	preemptionGeneration := m.preemptionGeneration()
 	setupCtx, cancelSetup := context.WithTimeout(m.ctx, cameraMonitorSetupTimeout)
 	err := m.agent.StartMonitor(setupCtx)
 	cancelSetup()
@@ -234,10 +360,20 @@ func (m *cameraMonitorController) runSession() (retErr error) {
 	defer transport.CloseIdleConnections()
 
 	frames := 0
+	audioStarted := false
 	var baseline [sha256.Size]byte
 	for {
 		if active, _ := m.demand(time.Now()); !active {
 			return nil
+		}
+		if !audioStarted && m.audioDemand() {
+			audioCtx, cancelAudio := context.WithTimeout(sessionCtx, cameraMonitorSetupTimeout)
+			err := m.agent.StartMonitorAudio(audioCtx)
+			cancelAudio()
+			if err != nil {
+				return fmt.Errorf("start SIP monitor audio: %w", err)
+			}
+			audioStarted = true
 		}
 		requestStarted := time.Now()
 		requestCtx, cancelRequest := context.WithTimeout(sessionCtx, monitorJPEGReqTimeout)
@@ -248,6 +384,9 @@ func (m *cameraMonitorController) runSession() (retErr error) {
 				return nil
 			}
 			if sessionCtx.Err() != nil {
+				if m.preemptedSince(preemptionGeneration) {
+					return nil
+				}
 				return errCameraMonitorEndedByRemote
 			}
 			return err
@@ -270,6 +409,9 @@ func (m *cameraMonitorController) runSession() (retErr error) {
 		)
 		if !m.waitForNextPoll(sessionCtx, requestStarted) {
 			if m.ctx.Err() == nil && sessionCtx.Err() != nil {
+				if m.preemptedSince(preemptionGeneration) {
+					return nil
+				}
 				return errCameraMonitorEndedByRemote
 			}
 			return nil

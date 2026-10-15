@@ -64,6 +64,60 @@ func TestBuildIncomingMonitorAnswer(t *testing.T) {
 	}
 }
 
+func TestIncomingJPEGLivePollingContinuesAfterSavedFileHold(t *testing.T) {
+	jpegData := testJPEG(t, color.RGBA{R: 0x33, G: 0x66, B: 0x99, A: 0xff})
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		response.Header().Set("Content-Type", "image/jpeg")
+		_, _ = response.Write(jpegData)
+	}))
+	defer server.Close()
+	endpoint, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	directory := t.TempDir()
+	output := filepath.Join(directory, "incoming.jpg")
+	agent := &Agent{
+		cfg: Config{
+			IncomingJPEGDir:      directory,
+			IncomingJPEGHold:     Duration{Duration: 40 * time.Millisecond},
+			IncomingJPEGInterval: Duration{Duration: 15 * time.Millisecond},
+			IncomingJPEGMaxFiles: 10,
+		},
+		frameHub: NewFrameHub(),
+	}
+	agent.markIncomingJPEGActive(output)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go agent.captureIncomingJPEG(ctx, done, endpoint, output, "call-test", "interphone0")
+
+	time.Sleep(90 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("incoming JPEG polling stopped when the saved-file hold expired")
+	default:
+	}
+	if got := requests.Load(); got < 5 {
+		t.Fatalf("JPEG requests after hold = %d, want at least 5", got)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("incoming JPEG polling did not stop after call cancellation")
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatalf("saved incoming JPEG: %v", err)
+	}
+	frame, ok := agent.frameHub.Snapshot()
+	if !ok || !bytes.Equal(frame.Data, jpegData) {
+		t.Fatal("live camera did not retain the incoming JPEG")
+	}
+}
+
 func TestHandleInboundPRACKAcceptsIFBOXQuirks(t *testing.T) {
 	agent := &Agent{prackWaiters: make(map[string]*inboundPRACKWaiter)}
 	waiter, err := agent.registerPRACKWaiter("call-1", "our-tag")
@@ -178,6 +232,7 @@ func TestIncomingJPEGCaptureAndAutomaticUnlockModes(t *testing.T) {
 	}
 	messageClient := &alwaysOKSIPClient{}
 	agent.cli = messageClient
+	agent.incomingCallTimeout = 150 * time.Millisecond
 	agent.registerLoopFn = func(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
@@ -197,12 +252,13 @@ func TestIncomingJPEGCaptureAndAutomaticUnlockModes(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		caller        string
-		captureImages bool
-		autoUnlock    bool
-		wantJPEG      bool
-		wantUnlock    bool
+		name             string
+		caller           string
+		captureImages    bool
+		autoUnlock       bool
+		enableDuringCall bool
+		wantJPEG         bool
+		wantUnlock       bool
 	}{
 		{
 			name:          "capture only",
@@ -217,6 +273,14 @@ func TestIncomingJPEGCaptureAndAutomaticUnlockModes(t *testing.T) {
 			autoUnlock:    true,
 			wantJPEG:      true,
 			wantUnlock:    true,
+		},
+		{
+			name:             "enable unlock during active call",
+			caller:           "interphone0",
+			captureImages:    true,
+			enableDuringCall: true,
+			wantJPEG:         true,
+			wantUnlock:       true,
 		},
 		{
 			name:          "capture without unlock for excluded caller",
@@ -290,6 +354,10 @@ func TestIncomingJPEGCaptureAndAutomaticUnlockModes(t *testing.T) {
 					return nil
 				}
 				got183 = true
+				if test.enableDuringCall {
+					agent.SetMessageEnabled(true)
+					agent.SetMessageEnabled(true)
+				}
 				if header := response.GetHeader("Require"); header == nil || !headerHasToken(header.Value(), "100rel") {
 					return fmt.Errorf("183 has no Require: 100rel")
 				}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -28,10 +29,26 @@ const (
 )
 
 var errMonitorActive = errors.New("monitor dialog is already active")
+var errIncomingCallActive = errors.New("incoming call has priority over monitor")
+
+const (
+	monitorTalkingContentType = "application/intercom.message+xml"
+	monitorTalkingBody        = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\r\n" +
+		"<IFBOX version = \"1.0\">\r\n" +
+		"    <SYSTEM>\r\n" +
+		"        <SYS_COMMAND>\r\n" +
+		"            <USER_COMM  state = \"request\"  type = \"talking\">CONNECT</USER_COMM>\r\n" +
+		"        </SYS_COMMAND>\r\n" +
+		"    </SYSTEM>\r\n" +
+		"</IFBOX>\r\n"
+)
 
 func (a *Agent) StartMonitor(ctx context.Context) error {
 	if a.cfg.MonitorURI == "" {
 		return errors.New("monitor URI is not configured")
+	}
+	if a.hasActiveIncomingCall() {
+		return errIncomingCallActive
 	}
 
 	a.monitorMu.Lock()
@@ -39,37 +56,80 @@ func (a *Agent) StartMonitor(ctx context.Context) error {
 		a.monitorMu.Unlock()
 		return errMonitorActive
 	}
+	dialCtx, cancelDial := context.WithCancel(ctx)
 	a.monitorState = monitorStarting
+	a.monitorStartCancel = cancelDial
+	a.monitorLifecycle = make(chan struct{})
+	a.monitorTalkingCallID = ""
+	lifecycle := a.monitorLifecycle
 	a.monitorMu.Unlock()
 
-	dialog, err := a.dialMonitor(ctx)
+	dialog, err := a.dialMonitor(dialCtx)
+	setupCanceled := dialCtx.Err() != nil
+	cancelDial()
+	incomingActive := a.hasActiveIncomingCall()
 
 	a.monitorMu.Lock()
-	defer a.monitorMu.Unlock()
+	a.monitorStartCancel = nil
 	if err != nil {
 		a.monitorState = monitorIdle
+		a.closeMonitorLifecycleLocked(lifecycle)
+		a.monitorMu.Unlock()
 		return err
+	}
+	// A priority caller may have canceled the setup just as the final 200/ACK
+	// completed. Do not expose that dialog as an active monitor.
+	if setupCanceled || incomingActive {
+		a.monitorState = monitorStopping
+		a.monitorDialog = dialog
+		a.monitorMu.Unlock()
+		stopCtx, cancel := context.WithTimeout(context.Background(), cameraMonitorStopTimeout)
+		err := a.finishStoppingMonitor(stopCtx, dialog, lifecycle)
+		cancel()
+		if err != nil {
+			return errors.Join(errIncomingCallActive, err)
+		}
+		return errIncomingCallActive
 	}
 	a.monitorDialog = dialog
 	a.monitorState = monitorConfirmed
+	a.monitorMu.Unlock()
 	return nil
 }
 
 func (a *Agent) StopMonitor(ctx context.Context) error {
 	a.monitorMu.Lock()
-	if a.monitorState == monitorIdle {
+	switch a.monitorState {
+	case monitorIdle:
+		a.monitorMu.Unlock()
+		return nil
+	case monitorStarting:
+		cancel := a.monitorStartCancel
+		done := a.monitorLifecycle
+		a.monitorMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return waitMonitorLifecycle(ctx, done)
+	case monitorStopping:
+		done := a.monitorLifecycle
+		a.monitorMu.Unlock()
+		return waitMonitorLifecycle(ctx, done)
+	}
+	dialog := a.monitorDialog
+	lifecycle := a.monitorLifecycle
+	if dialog == nil {
+		a.monitorState = monitorIdle
+		a.closeMonitorLifecycleLocked(lifecycle)
 		a.monitorMu.Unlock()
 		return nil
 	}
-	if a.monitorState != monitorConfirmed || a.monitorDialog == nil {
-		state := a.monitorState
-		a.monitorMu.Unlock()
-		return fmt.Errorf("monitor dialog cannot stop in state %d", state)
-	}
-	dialog := a.monitorDialog
 	a.monitorState = monitorStopping
 	a.monitorMu.Unlock()
+	return a.finishStoppingMonitor(ctx, dialog, lifecycle)
+}
 
+func (a *Agent) finishStoppingMonitor(ctx context.Context, dialog *diago.DialogClientSession, lifecycle chan struct{}) error {
 	callID := monitorCallID(dialog)
 	remoteEnded := dialog.Context().Err() != nil
 	var byeErr error
@@ -82,7 +142,9 @@ func (a *Agent) StopMonitor(ctx context.Context) error {
 	if a.monitorDialog == dialog {
 		a.monitorDialog = nil
 		a.monitorState = monitorIdle
+		a.monitorTalkingCallID = ""
 	}
+	a.closeMonitorLifecycleLocked(lifecycle)
 	a.monitorMu.Unlock()
 
 	if remoteEnded {
@@ -93,6 +155,32 @@ func (a *Agent) StopMonitor(ctx context.Context) error {
 	return errors.Join(byeErr, closeErr)
 }
 
+func (a *Agent) closeMonitorLifecycleLocked(lifecycle chan struct{}) {
+	if lifecycle == nil || a.monitorLifecycle != lifecycle {
+		return
+	}
+	close(lifecycle)
+	a.monitorLifecycle = nil
+}
+
+func waitMonitorLifecycle(ctx context.Context, done <-chan struct{}) error {
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (a *Agent) monitorActive() bool {
+	a.monitorMu.Lock()
+	defer a.monitorMu.Unlock()
+	return a.monitorState != monitorIdle
+}
+
 func (a *Agent) monitorDone() <-chan struct{} {
 	a.monitorMu.Lock()
 	defer a.monitorMu.Unlock()
@@ -100,6 +188,72 @@ func (a *Agent) monitorDone() <-chan struct{} {
 		return nil
 	}
 	return a.monitorDialog.Context().Done()
+}
+
+// StartMonitorAudio asks IFBOX to begin the audio portion of the active
+// monitor dialog and starts relaying received PCMU payloads. It is idempotent
+// for a dialog. Sending audio back uses the same dialog's RTP writer later, so
+// enabling talkback will not require replacing the receive path.
+func (a *Agent) StartMonitorAudio(ctx context.Context) error {
+	a.monitorMu.Lock()
+	if a.monitorState != monitorConfirmed || a.monitorDialog == nil {
+		a.monitorMu.Unlock()
+		return errors.New("monitor dialog is not confirmed")
+	}
+	dialog := a.monitorDialog
+	callID := monitorCallID(dialog)
+	if callID != "" && a.monitorTalkingCallID == callID {
+		a.monitorMu.Unlock()
+		return nil
+	}
+	a.monitorTalkingCallID = callID
+	a.monitorMu.Unlock()
+
+	if err := a.sendMessage(ctx, a.monitorRecipient, monitorTalkingContentType, []byte(monitorTalkingBody)); err != nil {
+		a.monitorMu.Lock()
+		if a.monitorDialog == dialog && a.monitorTalkingCallID == callID {
+			a.monitorTalkingCallID = ""
+		}
+		a.monitorMu.Unlock()
+		return fmt.Errorf("start monitor audio: %w", err)
+	}
+
+	a.monitorMu.Lock()
+	stillActive := a.monitorState == monitorConfirmed && a.monitorDialog == dialog
+	a.monitorMu.Unlock()
+	if !stillActive {
+		return errors.New("monitor dialog ended while starting audio")
+	}
+	go a.relayMonitorAudio(dialog, callID)
+	slog.Info("Monitor audio requested", "call_id", callID)
+	return nil
+}
+
+func (a *Agent) relayMonitorAudio(dialog *diago.DialogClientSession, callID string) {
+	if dialog == nil || dialog.Media() == nil || dialog.Media().RTPPacketReader == nil || a.audioHub == nil {
+		slog.Warn("Monitor audio relay unavailable", "call_id", callID)
+		return
+	}
+	reader := dialog.Media().RTPPacketReader
+	buffer := make([]byte, media.RTPBufSize)
+	packets := 0
+	bytes := 0
+	for {
+		n, err := reader.Read(buffer)
+		if n > 0 && reader.PacketHeader.PayloadType == media.CodecAudioUlaw.PayloadType {
+			a.audioHub.Publish(buffer[:n])
+			packets++
+			bytes += n
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) && dialog.Context().Err() == nil {
+				slog.Warn("Monitor audio relay stopped", "call_id", callID, "error", err)
+			} else {
+				slog.Info("Monitor audio relay stopped", "call_id", callID, "packets", packets, "bytes", bytes)
+			}
+			return
+		}
+	}
 }
 
 func (a *Agent) dialMonitor(ctx context.Context) (_ *diago.DialogClientSession, retErr error) {
@@ -134,7 +288,7 @@ func (a *Agent) dialMonitor(ctx context.Context) (_ *diago.DialogClientSession, 
 	if err := dialog.DialogClientSession.Invite(ctx, sipgo.ClientRequestBuild); err != nil {
 		return nil, fmt.Errorf("send monitor INVITE: %w", err)
 	}
-	err = dialog.DialogClientSession.WaitAnswer(ctx, sipgo.AnswerOptions{
+	err = dialog.WaitAnswer(ctx, sipgo.AnswerOptions{
 		Username: a.cfg.Username,
 		Password: a.cfg.Password,
 		OnResponse: func(res *sip.Response) error {
