@@ -155,7 +155,7 @@ func TestCameraRTSP(t *testing.T) {
 	wait("last viewer lease release", func() bool { return subscribers() == 0 })
 
 	probeCtx, cancelProbe := context.WithTimeout(ctx, 15*time.Second)
-	probe := exec.CommandContext(probeCtx, "ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-probesize", "1000000", "-analyzeduration", "3000000", "-i", fmt.Sprintf("rtsp://%s/intercom", ports[1]), "-select_streams", "v:0", "-read_intervals", "%+3", "-show_entries", "packet=pts_time,duration_time", "-of", "json")
+	probe := exec.CommandContext(probeCtx, "ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-probesize", "1000000", "-analyzeduration", "3000000", "-i", fmt.Sprintf("rtsp://%s/intercom", ports[1]), "-select_streams", "v:0", "-read_intervals", "%+3", "-show_entries", "packet=pts_time,duration_time,flags", "-of", "json")
 	rate, err := probe.Output()
 	cancelProbe()
 	if err != nil {
@@ -165,6 +165,7 @@ func TestCameraRTSP(t *testing.T) {
 		Packets []struct {
 			PTS      string `json:"pts_time"`
 			Duration string `json:"duration_time"`
+			Flags    string `json:"flags"`
 		} `json:"packets"`
 	}
 	if err := json.Unmarshal(rate, &packets); err != nil {
@@ -181,6 +182,9 @@ func TestCameraRTSP(t *testing.T) {
 		}
 		if duration < 0.49 || duration > 0.51 {
 			t.Fatalf("packet duration = %q, want about half a second", packet.Duration)
+		}
+		if !strings.Contains(packet.Flags, "K") {
+			t.Fatalf("packet flags = %q, want every frame to be a keyframe", packet.Flags)
 		}
 	}
 	for i := 1; i < len(packets.Packets); i++ {

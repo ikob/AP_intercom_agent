@@ -298,11 +298,11 @@ extends the monitor lease, so a dashboard repeatedly requesting still images
 can keep the monitor active even without an RTSP viewer.
 
 The FFmpeg input uses short probing and wallclock timestamps for sparse JPEGs.
-The output uses H.264 baseline/yuv420p at a constant 2 fps with one keyframe per
-second, allowing viewers to join promptly. Explicit output timing ensures HLS
-players receive correct half-second frame durations; the MJPEG demuxer's
-default 25 fps timing can leave Safari showing a blank player. This does not
-interpolate motion.
+The output uses H.264 baseline/yuv420p at a constant 2 fps and encodes every
+frame as an IDR frame, allowing a viewer to begin decoding at the next
+half-second frame. Explicit output timing ensures HLS players receive correct
+half-second frame durations; the MJPEG demuxer's default 25 fps timing can
+leave Safari showing a blank player. This does not interpolate motion.
 FFmpeg must support `-fps_mode` (FFmpeg 5.1 or newer). This configuration targets
 go2rtc 1.9.14. To inspect playback:
 
