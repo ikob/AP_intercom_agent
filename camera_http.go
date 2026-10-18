@@ -4,8 +4,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -15,6 +17,49 @@ const (
 	cameraMJPEGBoundary      = "ap_intercom_agent_frame"
 	cameraMJPEGFrameInterval = 500 * time.Millisecond
 )
+
+func (h *HTTPServer) handleCameraState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(h.camera.Snapshot())
+}
+
+func (h *HTTPServer) handleCameraReconnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	if h.camera == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"accepted": false,
+			"camera":   cameraMonitorSnapshot{State: "unavailable"},
+		})
+		return
+	}
+	if !h.camera.RequestReconnect() {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"accepted": false,
+			"camera":   h.camera.Snapshot(),
+		})
+		return
+	}
+	slog.Info("Manual camera reconnect requested")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"accepted": true,
+		"camera":   h.camera.Snapshot(),
+	})
+}
 
 func (h *HTTPServer) handleCameraSnapshot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {

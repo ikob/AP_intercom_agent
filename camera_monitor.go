@@ -31,6 +31,24 @@ const (
 
 var errCameraMonitorEndedByRemote = errors.New("monitor dialog ended by remote")
 
+const (
+	cameraStateIdle          = "idle"
+	cameraStateConnecting    = "connecting"
+	cameraStateActive        = "active"
+	cameraStateEndedByRemote = "ended_by_remote"
+	cameraStateSuspended     = "suspended"
+)
+
+type cameraMonitorSnapshot struct {
+	State              string `json:"state"`
+	MonitorActive      bool   `json:"monitor_active"`
+	DemandActive       bool   `json:"demand_active"`
+	ConsumerCount      int    `json:"consumer_count"`
+	AudioConsumerCount int    `json:"audio_consumer_count"`
+	ReconnectAvailable bool   `json:"reconnect_available"`
+	Suspended          bool   `json:"suspended"`
+}
+
 type cameraMonitorAgent interface {
 	StartMonitor(context.Context) error
 	StartMonitorAudio(context.Context) error
@@ -55,6 +73,9 @@ type cameraMonitorController struct {
 	lastDemand        time.Time
 	streams           int
 	audioStreams      int
+	demandGeneration  uint64
+	remoteEnded       bool
+	sessionActive     bool
 	suspended         bool
 	suspendGeneration uint64
 	wake              chan struct{}
@@ -90,7 +111,12 @@ func (m *cameraMonitorController) TouchSnapshot() {
 		return
 	}
 	m.mu.Lock()
-	m.lastDemand = time.Now()
+	now := time.Now()
+	if active, _ := m.rawDemandLocked(now); !active {
+		m.demandGeneration++
+		m.remoteEnded = false
+	}
+	m.lastDemand = now
 	m.mu.Unlock()
 	m.signal()
 }
@@ -100,8 +126,13 @@ func (m *cameraMonitorController) AcquireStream() func() {
 		return func() {}
 	}
 	m.mu.Lock()
+	now := time.Now()
+	if active, _ := m.rawDemandLocked(now); m.remoteEnded || (m.streams == 0 && !active) {
+		m.demandGeneration++
+		m.remoteEnded = false
+	}
 	m.streams++
-	m.lastDemand = time.Now()
+	m.lastDemand = now
 	m.mu.Unlock()
 	m.signal()
 
@@ -126,9 +157,14 @@ func (m *cameraMonitorController) AcquireAudioStream() func() {
 		return func() {}
 	}
 	m.mu.Lock()
+	now := time.Now()
+	if active, _ := m.rawDemandLocked(now); m.remoteEnded || (m.streams == 0 && !active) {
+		m.demandGeneration++
+		m.remoteEnded = false
+	}
 	m.streams++
 	m.audioStreams++
-	m.lastDemand = time.Now()
+	m.lastDemand = now
 	m.mu.Unlock()
 	m.signal()
 
@@ -152,7 +188,7 @@ func (m *cameraMonitorController) AcquireAudioStream() func() {
 func (m *cameraMonitorController) audioDemand() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return !m.suspended && m.audioStreams > 0
+	return !m.suspended && !m.remoteEnded && m.audioStreams > 0
 }
 
 func (m *cameraMonitorController) signal() {
@@ -213,9 +249,13 @@ func (m *cameraMonitorController) preemptedSince(generation uint64) bool {
 func (m *cameraMonitorController) demand(now time.Time) (active bool, idleRemaining time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.suspended {
+	if m.suspended || m.remoteEnded {
 		return false, 0
 	}
+	return m.rawDemandLocked(now)
+}
+
+func (m *cameraMonitorController) rawDemandLocked(now time.Time) (active bool, idleRemaining time.Duration) {
 	if m.streams > 0 {
 		return true, m.idle
 	}
@@ -224,6 +264,87 @@ func (m *cameraMonitorController) demand(now time.Time) (active bool, idleRemain
 	}
 	remaining := m.idle - now.Sub(m.lastDemand)
 	return remaining > 0, remaining
+}
+
+func (m *cameraMonitorController) currentDemandGeneration() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.demandGeneration
+}
+
+func (m *cameraMonitorController) setSessionActive(active bool) {
+	m.mu.Lock()
+	m.sessionActive = active
+	m.mu.Unlock()
+}
+
+func (m *cameraMonitorController) Snapshot() cameraMonitorSnapshot {
+	if m == nil {
+		return cameraMonitorSnapshot{State: "unavailable"}
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	demandActive, _ := m.rawDemandLocked(now)
+	state := cameraStateIdle
+	switch {
+	case m.suspended:
+		state = cameraStateSuspended
+	case m.remoteEnded && demandActive:
+		state = cameraStateEndedByRemote
+	case m.sessionActive:
+		state = cameraStateActive
+	case demandActive:
+		state = cameraStateConnecting
+	}
+	return cameraMonitorSnapshot{
+		State:              state,
+		MonitorActive:      m.sessionActive,
+		DemandActive:       demandActive,
+		ConsumerCount:      m.streams,
+		AudioConsumerCount: m.audioStreams,
+		ReconnectAvailable: m.remoteEnded,
+		Suspended:          m.suspended,
+	}
+}
+
+// RequestReconnect starts a new demand generation after the IFBOX ended the
+// preceding confirmed dialog. If the old consumers have already gone away, a
+// short snapshot lease is created so the explicit request still starts a new
+// monitor dialog.
+func (m *cameraMonitorController) RequestReconnect() bool {
+	if m == nil {
+		return false
+	}
+	now := time.Now()
+	m.mu.Lock()
+	if !m.remoteEnded {
+		m.mu.Unlock()
+		return false
+	}
+	active, _ := m.rawDemandLocked(now)
+	m.demandGeneration++
+	m.remoteEnded = false
+	if !active {
+		m.lastDemand = now
+	}
+	m.mu.Unlock()
+	m.signal()
+	return true
+}
+
+// blockAfterRemoteEnd prevents a confirmed monitor dialog that the IFBOX ended
+// from being recreated by the same outstanding HTTP/RTSP demand. A later demand
+// generation clears the block in TouchSnapshot, AcquireStream, or
+// AcquireAudioStream.
+func (m *cameraMonitorController) blockAfterRemoteEnd(generation uint64) {
+	m.mu.Lock()
+	m.sessionActive = false
+	if m.demandGeneration == generation {
+		m.remoteEnded = true
+	}
+	m.mu.Unlock()
+	m.signal()
 }
 
 func (m *cameraMonitorController) run() {
@@ -241,9 +362,8 @@ func (m *cameraMonitorController) run() {
 				continue
 			}
 			slog.Info("On-demand camera monitor ended by remote")
-			if placeholderErr := m.publishPlaceholder(); placeholderErr != nil {
-				slog.Warn("Failed to publish camera placeholder", "error", placeholderErr)
-			}
+			backoffFailures = 0
+			continue
 		}
 		if err == nil {
 			backoffFailures = 0
@@ -276,9 +396,6 @@ func (m *cameraMonitorController) run() {
 }
 
 func cameraMonitorNeedsBackoff(err error) bool {
-	if errors.Is(err, errCameraMonitorEndedByRemote) {
-		return true
-	}
 	var responseErr *sipgo.ErrDialogResponse
 	return errors.As(err, &responseErr) && responseErr.Res != nil && responseErr.Res.StatusCode == 603
 }
@@ -321,12 +438,15 @@ func (m *cameraMonitorController) waitForDemand() bool {
 
 func (m *cameraMonitorController) runSession() (retErr error) {
 	preemptionGeneration := m.preemptionGeneration()
+	demandGeneration := m.currentDemandGeneration()
 	setupCtx, cancelSetup := context.WithTimeout(m.ctx, cameraMonitorSetupTimeout)
 	err := m.agent.StartMonitor(setupCtx)
 	cancelSetup()
 	if err != nil {
 		return fmt.Errorf("start SIP monitor: %w", err)
 	}
+	m.setSessionActive(true)
+	defer m.setSessionActive(false)
 	slog.Info("On-demand camera monitor started")
 	defer func() {
 		stopCtx, cancelStop := context.WithTimeout(context.Background(), cameraMonitorStopTimeout)
@@ -387,6 +507,7 @@ func (m *cameraMonitorController) runSession() (retErr error) {
 				if m.preemptedSince(preemptionGeneration) {
 					return nil
 				}
+				m.blockAfterRemoteEnd(demandGeneration)
 				return errCameraMonitorEndedByRemote
 			}
 			return err
@@ -412,6 +533,7 @@ func (m *cameraMonitorController) runSession() (retErr error) {
 				if m.preemptedSince(preemptionGeneration) {
 					return nil
 				}
+				m.blockAfterRemoteEnd(demandGeneration)
 				return errCameraMonitorEndedByRemote
 			}
 			return nil

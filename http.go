@@ -168,6 +168,8 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 	})
 	mux.HandleFunc("/v1/camera.jpg", h.handleCameraSnapshot)
 	mux.HandleFunc("/v1/camera.mjpeg", h.handleCameraMJPEG)
+	mux.HandleFunc("/v1/camera/state", h.handleCameraState)
+	mux.HandleFunc("/v1/camera/reconnect", h.handleCameraReconnect)
 	mux.HandleFunc("/v1/audio.pcmu", h.handleAudioPCMU)
 
 	h.srv = &http.Server{

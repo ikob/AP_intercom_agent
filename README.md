@@ -291,12 +291,26 @@ HTTP/JPEG polling; concurrent viewers reuse it:
   frames). Connecting this endpoint holds the same monitor lease and sends the
   IFBOX `TALKING CONNECT` command once for that SIP dialog. PCMU silence is
   emitted while RTP is absent so downstream FFmpeg remains connected.
+- `GET /v1/camera/state` reports `idle`, `connecting`, `active`,
+  `ended_by_remote`, or `suspended`, along with demand and consumer counts.
+- `POST /v1/camera/reconnect` explicitly starts a new monitor generation after
+  an `ended_by_remote` state. It returns `202 Accepted`, or `409 Conflict` when
+  there is no remote-ended session to reconnect.
 
 When the last stream closes and no snapshot has been requested for 15 seconds,
 the agent sends BYE. A later request creates a new dialog. `HEAD` requests do
 not start or extend a monitor session. The monitor target defaults to
 `sip:monitor@<proxy host>`; `monitor_uri` or `-monitor-uri` can override it.
 Validated incoming-ring frames are published to the same source.
+
+If the IFBOX ends a confirmed monitor dialog, the agent keeps the latest JPEG
+but does not reconnect for the same outstanding camera demand. A new MJPEG or
+audio consumer starts a new dialog even if an older consumer remains connected.
+Because go2rtc may share one upstream producer between multiple Home Assistant
+viewers, use `POST /v1/camera/reconnect` when a new viewer is not visible to the
+agent as a new HTTP consumer. Repeated snapshot requests remain in the same
+demand lease until there has been a 15-second idle gap; the first request after
+that gap can start a new dialog.
 
 An incoming call has priority over the outgoing monitor dialog. The agent
 cancels a monitor still being established or sends BYE to a confirmed monitor

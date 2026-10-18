@@ -6,15 +6,64 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestHTTPCameraStateAndReconnect(t *testing.T) {
+	controller := &cameraMonitorController{
+		idle:        time.Second,
+		lastDemand:  time.Now(),
+		streams:     1,
+		remoteEnded: true,
+		wake:        make(chan struct{}, 1),
+		done:        make(chan struct{}),
+	}
+	handler := &HTTPServer{camera: controller}
+
+	stateResponse := httptest.NewRecorder()
+	handler.handleCameraState(stateResponse, httptest.NewRequest(http.MethodGet, "/v1/camera/state", nil))
+	if stateResponse.Code != http.StatusOK {
+		t.Fatalf("camera state status = %d", stateResponse.Code)
+	}
+	var state cameraMonitorSnapshot
+	if err := json.NewDecoder(stateResponse.Body).Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state.State != cameraStateEndedByRemote || !state.ReconnectAvailable || state.ConsumerCount != 1 {
+		t.Fatalf("camera state = %#v", state)
+	}
+
+	reconnectResponse := httptest.NewRecorder()
+	handler.handleCameraReconnect(reconnectResponse, httptest.NewRequest(http.MethodPost, "/v1/camera/reconnect", nil))
+	if reconnectResponse.Code != http.StatusAccepted {
+		t.Fatalf("camera reconnect status = %d, body = %s", reconnectResponse.Code, reconnectResponse.Body.String())
+	}
+	var reconnect struct {
+		Accepted bool                  `json:"accepted"`
+		Camera   cameraMonitorSnapshot `json:"camera"`
+	}
+	if err := json.NewDecoder(reconnectResponse.Body).Decode(&reconnect); err != nil {
+		t.Fatal(err)
+	}
+	if !reconnect.Accepted || reconnect.Camera.State != cameraStateConnecting || reconnect.Camera.ReconnectAvailable {
+		t.Fatalf("camera reconnect response = %#v", reconnect)
+	}
+
+	conflictResponse := httptest.NewRecorder()
+	handler.handleCameraReconnect(conflictResponse, httptest.NewRequest(http.MethodPost, "/v1/camera/reconnect", nil))
+	if conflictResponse.Code != http.StatusConflict {
+		t.Fatalf("second camera reconnect status = %d, want %d", conflictResponse.Code, http.StatusConflict)
+	}
+}
 
 func TestHTTPSnapshotUnavailableUntilFramePublished(t *testing.T) {
 	baseURL, cancel, agent, _, _ := startHTTPTestServer(t)

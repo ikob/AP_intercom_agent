@@ -156,7 +156,7 @@ func TestCameraMonitorControllerStartsAudioOnlyForAudioDemand(t *testing.T) {
 	releaseVideo()
 }
 
-func TestCameraMonitorControllerRedialsAfterRemoteEndWhileDemandRemains(t *testing.T) {
+func TestCameraMonitorControllerWaitsForNewStreamAfterRemoteEnd(t *testing.T) {
 	jpegData := testJPEG(t, color.RGBA{R: 0x20, G: 0x40, B: 0x60, A: 0xff})
 	var requests atomic.Int32
 	jpegServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
@@ -174,8 +174,6 @@ func TestCameraMonitorControllerRedialsAfterRemoteEndWhileDemandRemains(t *testi
 	fake := &fakeCameraMonitorAgent{endpoint: endpoint, hub: hub}
 	ctx, cancel := context.WithCancel(context.Background())
 	controller := newCameraMonitorController(ctx, fake, 50*time.Millisecond, 10*time.Millisecond)
-	controller.retryBase = 10 * time.Millisecond
-	controller.retryMax = 40 * time.Millisecond
 	t.Cleanup(func() {
 		cancel()
 		<-controller.done
@@ -187,18 +185,100 @@ func TestCameraMonitorControllerRedialsAfterRemoteEndWhileDemandRemains(t *testi
 	waitForFrameSHA256(t, hub, sha256.Sum256(jpegData))
 	fake.endMonitorFromRemote()
 	waitForAtomicAtLeast(t, &fake.stops, 1)
-	waitForAtomicAtLeast(t, &fake.starts, 2)
-
-	release()
 	time.Sleep(2 * 50 * time.Millisecond)
-	startsAfterRelease := fake.starts.Load()
-	time.Sleep(50 * time.Millisecond)
-	if got := fake.starts.Load(); got != startsAfterRelease {
-		t.Fatalf("released demand restarted monitor: starts changed from %d to %d", startsAfterRelease, got)
+	if got := fake.starts.Load(); got != 1 {
+		t.Fatalf("outstanding stream demand restarted monitor %d times, want 1", got)
+	}
+	waitForFrameSHA256(t, hub, sha256.Sum256(jpegData))
+	state := controller.Snapshot()
+	if state.State != cameraStateEndedByRemote || !state.ReconnectAvailable || state.ConsumerCount != 1 {
+		t.Fatalf("state after remote end = %#v", state)
+	}
+
+	secondRelease := controller.AcquireStream()
+	waitForAtomicAtLeast(t, &fake.starts, 2)
+	state = controller.Snapshot()
+	if state.State != cameraStateActive || state.ReconnectAvailable || state.ConsumerCount != 2 {
+		t.Fatalf("state after new consumer = %#v", state)
+	}
+	secondRelease()
+	release()
+}
+
+func TestCameraMonitorControllerManualReconnectWithExistingConsumer(t *testing.T) {
+	jpegData := testJPEG(t, color.RGBA{R: 0x20, G: 0x40, B: 0x60, A: 0xff})
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "image/jpeg")
+		_, _ = response.Write(jpegData)
+	}))
+	defer server.Close()
+	endpoint, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeCameraMonitorAgent{endpoint: endpoint, hub: NewFrameHub()}
+	ctx, cancel := context.WithCancel(context.Background())
+	controller := newCameraMonitorController(ctx, fake, time.Second, 10*time.Millisecond)
+	t.Cleanup(func() {
+		cancel()
+		<-controller.done
+	})
+
+	release := controller.AcquireStream()
+	defer release()
+	waitForAtomicAtLeast(t, &fake.starts, 1)
+	fake.endMonitorFromRemote()
+	waitForAtomicAtLeast(t, &fake.stops, 1)
+	if !controller.RequestReconnect() {
+		t.Fatal("manual reconnect was not accepted after remote end")
+	}
+	waitForAtomicAtLeast(t, &fake.starts, 2)
+	if controller.RequestReconnect() {
+		t.Fatal("manual reconnect was accepted without another remote end")
 	}
 }
 
-func TestCameraMonitorRetryBackoffForRemoteEndAnd603(t *testing.T) {
+func TestCameraMonitorControllerWaitsForNewSnapshotLeaseAfterRemoteEnd(t *testing.T) {
+	jpegData := testJPEG(t, color.RGBA{R: 0x20, G: 0x40, B: 0x60, A: 0xff})
+	jpegServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "image/jpeg")
+		_, _ = response.Write(jpegData)
+	}))
+	defer jpegServer.Close()
+	endpoint, err := url.Parse(jpegServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeCameraMonitorAgent{endpoint: endpoint, hub: NewFrameHub()}
+	ctx, cancel := context.WithCancel(context.Background())
+	const idle = 80 * time.Millisecond
+	controller := newCameraMonitorController(ctx, fake, idle, 10*time.Millisecond)
+	t.Cleanup(func() {
+		cancel()
+		<-controller.done
+	})
+
+	controller.TouchSnapshot()
+	waitForAtomicAtLeast(t, &fake.starts, 1)
+	fake.endMonitorFromRemote()
+	waitForAtomicAtLeast(t, &fake.stops, 1)
+
+	controller.TouchSnapshot()
+	time.Sleep(idle / 2)
+	controller.TouchSnapshot()
+	time.Sleep(idle)
+	if got := fake.starts.Load(); got != 1 {
+		t.Fatalf("same snapshot lease restarted monitor %d times, want 1", got)
+	}
+
+	time.Sleep(idle)
+	controller.TouchSnapshot()
+	waitForAtomicAtLeast(t, &fake.starts, 2)
+}
+
+func TestCameraMonitorRetryBackoffFor603(t *testing.T) {
 	base := 3 * time.Second
 	maximum := 10 * time.Second
 	for _, test := range []struct {
@@ -215,8 +295,8 @@ func TestCameraMonitorRetryBackoffForRemoteEndAnd603(t *testing.T) {
 		}
 	}
 
-	if !cameraMonitorNeedsBackoff(errCameraMonitorEndedByRemote) {
-		t.Fatal("remote monitor end does not enable backoff")
+	if cameraMonitorNeedsBackoff(errCameraMonitorEndedByRemote) {
+		t.Fatal("remote monitor end unexpectedly enables backoff")
 	}
 	declined := &sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 603}}
 	if !cameraMonitorNeedsBackoff(declined) {
