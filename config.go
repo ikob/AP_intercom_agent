@@ -309,7 +309,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.IntVar(&cfg.MonitorRepeat, "monitor-repeat", cfg.MonitorRepeat, "Number of sequential monitor dialogs in probe mode")
 	fs.StringVar(&cfg.MonitorJPEGOut, "monitor-jpeg-out", cfg.MonitorJPEGOut, "Absolute path atomically updated with the latest valid monitor JPEG")
 	fs.DurationVar(&cfg.MonitorJPEGInterval.Duration, "monitor-jpeg-interval", cfg.MonitorJPEGInterval.Duration, "Minimum interval between monitor JPEG requests")
-	fs.StringVar(&cfg.JPEGQueryS, "jpeg-query-s", cfg.JPEGQueryS, "Override for the IFBOX JPEG query parameter s (default: MD5(username + intercom))")
+	fs.StringVar(&cfg.JPEGQueryS, "jpeg-query-s", cfg.JPEGQueryS, "Override for the IFBOX JPEG query parameter s (default: derived from username)")
 	fs.StringVar(&cfg.IncomingJPEGDir, "incoming-jpeg-dir", cfg.IncomingJPEGDir, "Absolute directory for timestamped JPEGs captured from incoming rings")
 	fs.DurationVar(&cfg.IncomingJPEGHold.Duration, "incoming-jpeg-hold", cfg.IncomingJPEGHold.Duration, "How long the saved JPEG is updated for each incoming ring; live polling continues for the call")
 	fs.DurationVar(&cfg.IncomingJPEGInterval.Duration, "incoming-jpeg-interval", cfg.IncomingJPEGInterval.Duration, "Minimum interval between incoming-ring JPEG requests")
@@ -432,9 +432,8 @@ func ParseFlags(args []string) (Config, error) {
 }
 
 // jpegQuerySForUsername reproduces the official application's IFBOX image
-// query parameter: lowercase hexadecimal MD5 of the digest username followed
-// by the literal "intercom". MD5 is protocol compatibility here, not password
-// hashing or a security boundary.
+// query parameter from the configured digest username. MD5 is protocol
+// compatibility here, not password hashing or a security boundary.
 func jpegQuerySForUsername(username string) string {
 	sum := md5.Sum([]byte(username + "intercom"))
 	return hex.EncodeToString(sum[:])

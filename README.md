@@ -79,17 +79,15 @@ Each iteration performs an authenticated monitor INVITE, reliable provisional
 response/PRACK, final ACK, optional JPEG polling during the hold, and BYE. The
 JPEG URL is built from the answer SDP connection address and `m=video` HTTP
 port. Requests use `Host: ifbox` and the IFBOX CGI query parameter `s` observed
-in the official application. By default, the agent derives that value as the
-lowercase hexadecimal MD5 of the SIP digest username followed by the literal
-`intercom`. The output file is replaced only after a complete JPEG has been
-validated.
+in the official application. By default, the agent derives that value
+automatically from the configured SIP username. The output file is replaced
+only after a complete JPEG has been validated.
 
 ### Overriding `jpeg_query_s`
 
-The `s` value is not supplied by SIP or SDP. The official application computes
-it as `MD5(username + "intercom")`; for example, username `cellphone0` produces
-`cd188d8e518cb12ad7a644f23928f64f`. Normally no JPEG query configuration is
-needed. If a different application or IFBOX variant requires another value,
+The `s` value is not supplied by SIP or SDP. Normally no JPEG query
+configuration is needed because the agent derives it from the configured SIP
+username. If a different application or IFBOX variant requires another value,
 set `jpeg_query_s` or `-jpeg-query-s` explicitly; a non-empty override takes
 precedence over the generated value.
 
