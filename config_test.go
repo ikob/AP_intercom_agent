@@ -37,6 +37,13 @@ func TestDurationJSON(t *testing.T) {
 	}
 }
 
+func TestJPEGQuerySForUsernameMatchesOfficialApplication(t *testing.T) {
+	const want = "cd188d8e518cb12ad7a644f23928f64f"
+	if got := jpegQuerySForUsername("cellphone0"); got != want {
+		t.Fatalf("JPEG query s = %q, want %q", got, want)
+	}
+}
+
 func TestDefaultConfigUsesSafeRuntimeControls(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.AnswerCalls || cfg.SendMessages || !cfg.CaptureImages {
@@ -73,8 +80,8 @@ func TestLoadConfigFile(t *testing.T) {
 	if cfg.RegisterURI == "" || cfg.MessageURI == "" || cfg.EntranceURI == "" {
 		t.Fatalf("missing URIs: %+v", cfg)
 	}
-	if cfg.JPEGQueryS != defaultJPEGQueryS {
-		t.Fatalf("JPEG query s = %q, want default %q", cfg.JPEGQueryS, defaultJPEGQueryS)
+	if cfg.JPEGQueryS != "" {
+		t.Fatalf("unresolved JPEG query s = %q, want empty", cfg.JPEGQueryS)
 	}
 	if cfg.IncomingJPEGMaxFiles != 100 {
 		t.Fatalf("incoming JPEG max files = %d, want 100", cfg.IncomingJPEGMaxFiles)
@@ -184,6 +191,20 @@ func TestParseFlagsNoConfigNeeded(t *testing.T) {
 	}
 	if cfg.AnswerCalls || cfg.SendMessages || !cfg.CaptureImages {
 		t.Fatalf("safe defaults answer=%v send=%v capture=%v, want false/false/true", cfg.AnswerCalls, cfg.SendMessages, cfg.CaptureImages)
+	}
+	if want := jpegQuerySForUsername("u"); cfg.JPEGQueryS != want {
+		t.Fatalf("JPEG query s = %q, want generated %q", cfg.JPEGQueryS, want)
+	}
+}
+
+func TestParseFlagsGeneratesJPEGQuerySAfterUsernameOverride(t *testing.T) {
+	args := append(requiredArgs(), "-username=cellphone0", "-jpeg-query-s=")
+	cfg, err := ParseFlags(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := jpegQuerySForUsername("cellphone0"); cfg.JPEGQueryS != want {
+		t.Fatalf("JPEG query s = %q, want generated %q", cfg.JPEGQueryS, want)
 	}
 }
 
@@ -537,7 +558,6 @@ func TestParseFlagsIncomingJPEGValidation(t *testing.T) {
 		{name: "positive hold", args: []string{"-incoming-jpeg-dir=/tmp/frames", "-incoming-jpeg-hold=0"}, wantErr: "incoming-jpeg-hold must be positive"},
 		{name: "positive interval", args: []string{"-incoming-jpeg-dir=/tmp/frames", "-incoming-jpeg-interval=0"}, wantErr: "incoming-jpeg-interval must be positive"},
 		{name: "positive max files", args: []string{"-incoming-jpeg-dir=/tmp/frames", "-incoming-jpeg-max-files=0"}, wantErr: "incoming-jpeg-max-files must be at least 1"},
-		{name: "nonempty query s", args: []string{"-jpeg-query-s="}, wantErr: "jpeg-query-s must not be empty"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

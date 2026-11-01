@@ -159,11 +159,12 @@ func TestMonitorDialogSequenceTwice(t *testing.T) {
 	prackComplete := make(chan struct{}, 2)
 	serverErrors := make(chan error, 16)
 	jpegData := testJPEG(t, color.RGBA{R: 40, G: 80, B: 120, A: 255})
+	var queryS string
 	jpegServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Host != monitorJPEGHost {
 			serverErrors <- fmt.Errorf("unexpected JPEG Host: %q", request.Host)
 		}
-		if request.URL.Path != monitorJPEGPath || request.URL.Query().Get("s") != defaultJPEGQueryS {
+		if request.URL.Path != monitorJPEGPath || request.URL.Query().Get("s") != queryS {
 			serverErrors <- fmt.Errorf("unexpected JPEG URL: %s", request.URL.Redacted())
 		}
 		jpegRequests.Add(1)
@@ -294,6 +295,7 @@ func TestMonitorDialogSequenceTwice(t *testing.T) {
 	})
 
 	cfg := testConfig(agentPort)
+	queryS = jpegQuerySForUsername(cfg.Username)
 	cfg.UserAgentHostname = "127.0.0.1"
 	cfg.ContactParams = ";+l.operator.docomo.intercom"
 	cfg.RegisterURI = fmt.Sprintf("sip:alice@127.0.0.1:%d", serverPort)

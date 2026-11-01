@@ -42,6 +42,7 @@ func testJPEG(t testing.TB, fill color.Color) []byte {
 }
 
 func TestMonitorJPEGEndpointFromSDP(t *testing.T) {
+	queryS := jpegQuerySForUsername("cellphone0")
 	tests := []struct {
 		name    string
 		sdp     string
@@ -54,7 +55,7 @@ func TestMonitorJPEGEndpointFromSDP(t *testing.T) {
 				"c=IN IP4 192.0.2.25\r\n" +
 				"m=audio 20000 RTP/AVP 0\r\n" +
 				"m=video 8080 HTTP jpeg\r\n",
-			want: "http://192.0.2.25:8080/cgi-bin/image.cgi?s=" + defaultJPEGQueryS,
+			want: "http://192.0.2.25:8080/cgi-bin/image.cgi?s=" + queryS,
 		},
 		{
 			name: "video IPv6 override",
@@ -62,7 +63,7 @@ func TestMonitorJPEGEndpointFromSDP(t *testing.T) {
 				"c=IN IP4 192.0.2.25\r\n" +
 				"m=video 18080 HTTP jpeg\r\n" +
 				"c=IN IP6 2001:db8::25\r\n",
-			want: "http://[2001:db8::25]:18080/cgi-bin/image.cgi?s=" + defaultJPEGQueryS,
+			want: "http://[2001:db8::25]:18080/cgi-bin/image.cgi?s=" + queryS,
 		},
 		{
 			name:    "missing video",
@@ -88,7 +89,7 @@ func TestMonitorJPEGEndpointFromSDP(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			endpoint, err := monitorJPEGEndpointFromSDP([]byte(test.sdp), defaultJPEGQueryS)
+			endpoint, err := monitorJPEGEndpointFromSDP([]byte(test.sdp), queryS)
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("expected error containing %q, got %v", test.wantErr, err)
@@ -119,8 +120,9 @@ func TestMonitorJPEGEndpointUsesConfiguredQueryS(t *testing.T) {
 }
 
 func TestFetchMonitorJPEG(t *testing.T) {
+	queryS := jpegQuerySForUsername("cellphone0")
 	jpegData := testJPEG(t, color.RGBA{R: 20, G: 40, B: 60, A: 255})
-	endpoint, err := url.Parse("http://192.0.2.25:8080/cgi-bin/image.cgi?s=" + defaultJPEGQueryS)
+	endpoint, err := url.Parse("http://192.0.2.25:8080/cgi-bin/image.cgi?s=" + queryS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +130,7 @@ func TestFetchMonitorJPEG(t *testing.T) {
 		if request.Host != monitorJPEGHost {
 			t.Errorf("Host = %q, want %q", request.Host, monitorJPEGHost)
 		}
-		if request.URL.Path != monitorJPEGPath || request.URL.Query().Get("s") != defaultJPEGQueryS {
+		if request.URL.Path != monitorJPEGPath || request.URL.Query().Get("s") != queryS {
 			t.Errorf("unexpected request URL %s", request.URL.Redacted())
 		}
 		for header, want := range map[string]string{

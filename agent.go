@@ -81,6 +81,7 @@ type sipClient interface {
 }
 
 func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
+	cfg.JPEGQueryS = resolveJPEGQueryS(cfg.Username, cfg.JPEGQueryS)
 	recipient := sip.Uri{}
 	if err := sip.ParseUri(cfg.RegisterURI, &recipient); err != nil {
 		return nil, fmt.Errorf("failed to parse register uri: %w", err)

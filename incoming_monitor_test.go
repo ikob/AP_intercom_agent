@@ -187,12 +187,13 @@ func TestIncomingJPEGFilename(t *testing.T) {
 func TestIncomingJPEGCaptureAndAutomaticUnlockModes(t *testing.T) {
 	agentPort := freeUDPPort(t)
 	jpegData := testJPEG(t, color.RGBA{R: 30, G: 90, B: 150, A: 255})
+	queryS := jpegQuerySForUsername("cellphone0")
 	var jpegRequests atomic.Int32
 	jpegServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Host != monitorJPEGHost {
 			t.Errorf("Host = %q, want %q", request.Host, monitorJPEGHost)
 		}
-		if request.URL.Path != monitorJPEGPath || request.URL.Query().Get("s") != defaultJPEGQueryS {
+		if request.URL.Path != monitorJPEGPath || request.URL.Query().Get("s") != queryS {
 			t.Errorf("unexpected JPEG URL: %s", request.URL.Redacted())
 		}
 		jpegRequests.Add(1)

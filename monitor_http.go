@@ -27,7 +27,6 @@ import (
 
 const (
 	monitorJPEGPath       = "/cgi-bin/image.cgi"
-	defaultJPEGQueryS     = "cd188d8e518cb12ad7a644f23928f64f"
 	monitorJPEGMaxBytes   = 2 << 20
 	monitorJPEGHost       = "ifbox"
 	monitorJPEGUserAgent  = "AIPHONE/1.0 iPhone18,1(intercom)"

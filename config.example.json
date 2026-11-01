@@ -25,8 +25,6 @@
   "monitor_repeat": 1,
   "monitor_jpeg_out": "",
   "monitor_jpeg_interval": "500ms",
-  "jpeg_query_s": "cd188d8e518cb12ad7a644f23928f64f",
-
   "incoming_jpeg_dir": "",
   "incoming_jpeg_hold": "5s",
   "incoming_jpeg_interval": "500ms",
