@@ -333,6 +333,9 @@ func (a *Agent) runIncomingCallSession(appCtx context.Context, session *incoming
 				startHangup()
 				continue
 			}
+			if a.talkback != nil && media.talkback != nil {
+				media.talkbackStop = a.talkback.SetTarget("incoming:"+session.callID, media.talkback)
+			}
 			a.transitionIncomingCall(appCtx, session, CallStateConnected, "")
 			if autoAnswer {
 				autoHangup = time.After(time.Second)

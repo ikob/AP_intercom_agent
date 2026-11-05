@@ -30,7 +30,7 @@ func startHTTPTestServer(t *testing.T) (string, context.CancelFunc, *Agent, *Con
 	ctx, cancel := context.WithCancel(context.Background())
 	addr := freeTCPAddr(t)
 
-	agent := &Agent{frameHub: NewFrameHub(), audioHub: NewAudioHub()}
+	agent := &Agent{frameHub: NewFrameHub(), audioHub: NewAudioHub(), talkback: newTalkbackController()}
 	agent.answerEnabled.Store(true)
 	agent.messageEnabled.Store(false)
 	agent.captureEnabled.Store(true)

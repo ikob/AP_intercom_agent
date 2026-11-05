@@ -11,6 +11,13 @@ streams:
   intercom:
     - "ffmpeg:http://127.0.0.1:18080/v1/camera.mjpeg#input=intercom_mjpeg#video=h264"
     - "ffmpeg:http://127.0.0.1:18080/v1/audio.pcmu#input=intercom_pcmu#audio=opus"
+    # go2rtc supplies PCMA from the WebRTC microphone on stdin. FFmpeg changes
+    # it to the IFBOX PCMU format and keeps one chunked HTTP upload open while
+    # Home Assistant's talk control is enabled. Home Assistant reconnects its
+    # WebRTC session when the microphone starts. The second identical source
+    # gives that session its own stdin while the view-only session winds down.
+    - "exec:ffmpeg -hide_banner -loglevel warning -f alaw -ar 8000 -ac 1 -i pipe:0 -c:a pcm_mulaw -ar 8000 -ac 1 -f mulaw -method POST http://127.0.0.1:18080/v1/talk.pcmu#backchannel=1#audio=alaw/8000"
+    - "exec:ffmpeg -hide_banner -loglevel warning -f alaw -ar 8000 -ac 1 -i pipe:0 -c:a pcm_mulaw -ar 8000 -ac 1 -f mulaw -method POST http://127.0.0.1:18080/v1/talk.pcmu#backchannel=1#audio=alaw/8000"
 
 ffmpeg:
   # Avoid multi-second probing and the demuxer's assumed 25 fps timestamps.

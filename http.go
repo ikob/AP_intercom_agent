@@ -41,6 +41,9 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 		)
 		agent.cameraMonitor = h.camera
 	}
+	if agent != nil && agent.talkback != nil {
+		agent.talkback.Run(ctx)
+	}
 
 	mux := http.NewServeMux()
 
@@ -171,6 +174,8 @@ func StartHTTP(ctx context.Context, listen string, agent *Agent, cfg *Config, ms
 	mux.HandleFunc("/v1/camera/state", h.handleCameraState)
 	mux.HandleFunc("/v1/camera/reconnect", h.handleCameraReconnect)
 	mux.HandleFunc("/v1/audio.pcmu", h.handleAudioPCMU)
+	mux.HandleFunc("/v1/talk", h.handleTalkbackState)
+	mux.HandleFunc("/v1/talk.pcmu", h.handleTalkbackPCMU)
 
 	h.srv = &http.Server{
 		Addr:              listen,

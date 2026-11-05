@@ -89,6 +89,8 @@ type incomingCallMedia struct {
 	captureCancel context.CancelFunc
 	captureDone   chan struct{}
 	audioDone     chan struct{}
+	talkback      talkbackFrameWriter
+	talkbackStop  func()
 }
 
 func (m *incomingCallMedia) Close() {
@@ -97,6 +99,10 @@ func (m *incomingCallMedia) Close() {
 	}
 	if m.captureCancel != nil {
 		m.captureCancel()
+	}
+	if m.talkbackStop != nil {
+		m.talkbackStop()
+		m.talkbackStop = nil
 	}
 	if m.stopDialog != nil {
 		m.stopDialog()
@@ -133,7 +139,22 @@ func (a *Agent) prepareIncomingCall(parent context.Context, dialog *diago.Dialog
 	if err != nil {
 		return nil, err
 	}
-	media := &incomingCallMedia{answer: answer, audioSocket: audioSocket}
+	callMedia := &incomingCallMedia{
+		answer:      answer,
+		audioSocket: audioSocket,
+	}
+	audioEndpoint, endpointErr := audioEndpointFromSDP(request.Body())
+	if endpointErr != nil {
+		// Preserve receive-only compatibility with non-PCMU test peers. AIPHONE
+		// offers PCMU; without it this call simply has no talkback target.
+		slog.Debug("Incoming talkback unavailable", "call_id", callID, "error", endpointErr)
+	} else if endpointErr = validateIncomingAudioEndpoint(request, audioEndpoint); endpointErr != nil {
+		_ = audioSocket.Close()
+		return nil, endpointErr
+	} else {
+		callMedia.talkback = newIncomingPCMURTPWriter(audioSocket, audioEndpoint)
+	}
+	media := callMedia
 	fail := func(err error) (*incomingCallMedia, error) {
 		media.Close()
 		return nil, err
@@ -362,6 +383,21 @@ func validateIncomingJPEGEndpoint(request *sip.Request, endpoint *url.URL) error
 	sourceIP := net.ParseIP(sourceHost)
 	if sourceIP == nil || !sourceIP.Equal(targetIP) {
 		return fmt.Errorf("incoming JPEG endpoint %s does not match SIP source %s", targetIP, sourceHost)
+	}
+	return nil
+}
+
+func validateIncomingAudioEndpoint(request *sip.Request, endpoint *net.UDPAddr) error {
+	if endpoint == nil || endpoint.IP == nil {
+		return errors.New("incoming audio endpoint is not an IP address")
+	}
+	sourceHost, _, err := net.SplitHostPort(request.Source())
+	if err != nil {
+		return fmt.Errorf("parse incoming SIP source %q: %w", request.Source(), err)
+	}
+	sourceIP := net.ParseIP(sourceHost)
+	if sourceIP == nil || !sourceIP.Equal(endpoint.IP) {
+		return fmt.Errorf("incoming audio endpoint %s does not match SIP source %s", endpoint.IP, sourceHost)
 	}
 	return nil
 }

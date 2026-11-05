@@ -131,6 +131,16 @@ func (a *Agent) StopMonitor(ctx context.Context) error {
 
 func (a *Agent) finishStoppingMonitor(ctx context.Context, dialog *diago.DialogClientSession, lifecycle chan struct{}) error {
 	callID := monitorCallID(dialog)
+	a.monitorMu.Lock()
+	var stopTalkback func()
+	if a.monitorDialog == dialog {
+		stopTalkback = a.monitorTalkbackStop
+		a.monitorTalkbackStop = nil
+	}
+	a.monitorMu.Unlock()
+	if stopTalkback != nil {
+		stopTalkback()
+	}
 	remoteEnded := dialog.Context().Err() != nil
 	var byeErr error
 	if !remoteEnded {
@@ -143,6 +153,7 @@ func (a *Agent) finishStoppingMonitor(ctx context.Context, dialog *diago.DialogC
 		a.monitorDialog = nil
 		a.monitorState = monitorIdle
 		a.monitorTalkingCallID = ""
+		a.monitorTalkbackStop = nil
 	}
 	a.closeMonitorLifecycleLocked(lifecycle)
 	a.monitorMu.Unlock()
@@ -220,6 +231,9 @@ func (a *Agent) StartMonitorAudio(ctx context.Context) error {
 
 	a.monitorMu.Lock()
 	stillActive := a.monitorState == monitorConfirmed && a.monitorDialog == dialog
+	if stillActive && dialog.Media() != nil && dialog.Media().RTPPacketWriter != nil && a.talkback != nil {
+		a.monitorTalkbackStop = a.talkback.SetTarget("monitor:"+callID, newPCMURTPWriter(dialog.Media().RTPPacketWriter))
+	}
 	a.monitorMu.Unlock()
 	if !stillActive {
 		return errors.New("monitor dialog ended while starting audio")

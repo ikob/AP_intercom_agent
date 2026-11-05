@@ -52,6 +52,7 @@ type Agent struct {
 	monitorStartCancel   context.CancelFunc
 	monitorLifecycle     chan struct{}
 	monitorTalkingCallID string
+	monitorTalkbackStop  func()
 	cameraMonitor        *cameraMonitorController
 	callMu               sync.Mutex
 	activeCall           *incomingCallSession
@@ -63,6 +64,7 @@ type Agent struct {
 	incomingJPEGActive   map[string]int
 	frameHub             *FrameHub
 	audioHub             *AudioHub
+	talkback             *talkbackController
 	ringWebhookMu        sync.Mutex
 	ringWebhookSeen      map[string]time.Time
 	webhookOrderMu       sync.Mutex
@@ -130,6 +132,7 @@ func NewAgent(cfg Config, msgBuf *MessageBuffer) (*Agent, error) {
 		incomingJPEGActive:  make(map[string]int),
 		frameHub:            NewFrameHub(),
 		audioHub:            NewAudioHub(),
+		talkback:            newTalkbackController(),
 		ringWebhookSeen:     make(map[string]time.Time),
 		callUnlocks:         make(map[*incomingCallUnlock]struct{}),
 		incomingCallTimeout: defaultIncomingCallTimeout,

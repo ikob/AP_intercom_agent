@@ -291,6 +291,15 @@ HTTP/JPEG polling; concurrent viewers reuse it:
   frames). Connecting this endpoint holds the same monitor lease and sends the
   IFBOX `TALKING CONNECT` command once for that SIP dialog. PCMU silence is
   emitted while RTP is absent so downstream FFmpeg remains connected.
+- `GET /v1/talk` reports whether a SIP talkback target and microphone input
+  are active, with RTP packet, byte, and dropped-frame counters.
+- `POST` or `PUT /v1/talk.pcmu` accepts long-lived raw G.711 PCMU uploads
+  (8 kHz, mono, 20 ms frames). Overlapping uploads are allowed because Home
+  Assistant reconnects WebRTC when its microphone starts; only uploads that
+  carry frames affect the active talkback stream. The upload connection is the
+  talk/PTT gate.
+  While it is closed, the SIP target receives continuous PCMU silence; while
+  it is open, microphone frames replace that silence.
 - `GET /v1/camera/state` reports `idle`, `connecting`, `active`,
   `ended_by_remote`, or `suspended`, along with demand and consumer counts.
 - `POST /v1/camera/reconnect` explicitly starts a new monitor generation after
@@ -330,10 +339,12 @@ ffplay -f mulaw -ar 8000 -ac 1 http://127.0.0.1:18080/v1/audio.pcmu
 
 ### Home Assistant camera
 
-Use **Generic Camera** with the optional go2rtc sidecar. The pipeline is
-JPEG → HTTP MJPEG → FFmpeg H.264 plus SIP/RTP PCMU → FFmpeg Opus → go2rtc
-RTSP. Live monitoring defaults to two JPEG frames per second; the MJPEG
-transport does not recompress them.
+Home Assistant 2026.11 can use the custom component in the add-on repository
+for native WebRTC two-way audio. The pipeline is JPEG → HTTP MJPEG → FFmpeg
+H.264 plus SIP/RTP PCMU → FFmpeg Opus → go2rtc RTSP. The WebRTC microphone
+returns through the RTSP backchannel, FFmpeg converts PCMA to PCMU, and the
+agent packetizes it for the active SIP dialog. Live monitoring defaults to two
+JPEG frames per second; the MJPEG transport does not recompress them.
 
 Install [go2rtc](https://github.com/AlexxIT/go2rtc/releases) and FFmpeg with
 `libx264` on the same host as the agent, then run:
@@ -347,13 +358,30 @@ one host network. It exposes `rtsp://127.0.0.1:8554/intercom`; the Go agent
 continues to serve HTTP on port 18080. The sidecar is a separate process and
 must be started/supervised separately. No change to the SIP agent flags is needed.
 
-In Home Assistant's **Generic Camera** integration, configure:
+Install `custom_components/ap_intercom_agent` from the add-on repository under
+Home Assistant's `/config/custom_components`, restart Home Assistant, and add
+**AP Intercom Agent** from Settings > Devices & services. Its defaults are:
 
-- Still Image URL: `http://127.0.0.1:18080/v1/camera.jpg`
-- Stream Source URL: `rtsp://127.0.0.1:8554/intercom`
-- RTSP transport: TCP
-- Username and password: empty for this loopback configuration
-- Verify SSL: disabled for the HTTP snapshot URL
+- Agent HTTP URL: `http://127.0.0.1:18080`
+- RTSP stream URL: `rtsp://127.0.0.1:8554/intercom?backchannel=1`
+
+Enable **Two-way audio** under Settings > System > Labs and open Home
+Assistant over HTTPS. The live camera then shows Home Assistant's standard
+talk control. Enabling it opens the microphone/backchannel; disabling it gates
+the microphone and leaves continuous PCMU silence on the SIP media stream,
+matching the official application's PTT behavior. The 2026.11 frontend uses a
+start/stop talk toggle rather than a press-and-hold button; the agent's stream
+gate can support either UI behavior.
+
+Browser microphone access requires a secure context. The Home Assistant Cloud
+(Nabu Casa) URL satisfies this requirement; a plain local URL such as
+`http://homeassistant.local:8123` does not. Use local HTTPS when talkback is
+needed without the cloud URL.
+
+Generic Camera remains a receive-only fallback. Configure the same snapshot
+URL and `rtsp://127.0.0.1:8554/intercom` as its stream source, but it cannot
+declare Home Assistant's two-way-audio capability and Home Assistant wraps its
+RTSP source with FFmpeg, which removes the backchannel.
 
 If HA, go2rtc, or the agent are in separate containers/hosts, loopback refers to
 that container/host. Adjust the source address, RTSP listener, and HA URLs to
@@ -376,8 +404,9 @@ frame as an IDR frame, allowing a viewer to begin decoding at the next
 half-second frame. Explicit output timing ensures HLS players receive correct
 half-second frame durations; the MJPEG demuxer's default 25 fps timing can
 leave Safari showing a blank player. This does not interpolate motion.
-FFmpeg must support `-fps_mode` (FFmpeg 5.1 or newer). This configuration targets
-go2rtc 1.9.14. To inspect playback:
+FFmpeg must support `-fps_mode` (FFmpeg 5.1 or newer). This configuration
+targets go2rtc 1.9.15, whose RTSP server supports the backchannel consumed by
+Home Assistant's go2rtc provider. To inspect playback:
 
 ```bash
 ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/intercom
@@ -397,20 +426,21 @@ The existing **MJPEG IP Camera** integration remains usable with
 also accepts the snapshot URL alone, but the raw MJPEG URL is not the H.264
 stream source supplied by this setup.
 
-RTSP output does not implement a Matter accessory. Future Matter camera support
-requires a Matter implementation and WebRTC session handling; this H.264 stage
-provides a reusable video source. WebRTC listening is disabled in the standalone
-configuration until that separate integration is configured.
+RTSP output does not implement a Matter accessory and Home Assistant does not
+expose this camera as a Matter camera. WebRTC is terminated by Home Assistant's
+go2rtc provider; the standalone bridge's own WebRTC listener remains disabled.
 
-The RTSP source now includes received intercom audio. For outgoing monitoring,
+The RTSP source includes received intercom audio. For outgoing monitoring,
 the audio connection sends the same `TALKING CONNECT` MESSAGE used by the
 official app and relays received PCMU RTP. Incoming-call RTP is published to
-the same stream after the call media socket is allocated. The receive and SIP
-media layers are separated so a future microphone backchannel can write to the
-same dialog without replacing this path; microphone transmission is not yet
-implemented. Together with the optional webhook this provides a camera,
-receive audio, and a standard doorbell event entity, but it is not yet a
-complete Home Assistant intercom because two-way talk remains missing.
+the same stream after the call media socket is allocated. Talkback selects
+exactly one active SIP dialog, sends payload type 0 in 20 ms RTP frames, and
+cannot let an old dialog teardown clear a newer target. Monitor and incoming
+call receive paths continue while the microphone is gated. Together with the
+optional webhook this provides video, received audio, talkback, and a standard
+doorbell event entity. The talkback pipeline is covered by unit and HTTP tests
+and has been verified with Home Assistant 2026.11 against a real IFBOX,
+including audible microphone output at the intercom.
 On-demand monitoring and publishing incoming-ring frames to the live source have
 been verified with real hardware and are covered by protocol tests. The
 receive-audio path has also been verified through authenticated
